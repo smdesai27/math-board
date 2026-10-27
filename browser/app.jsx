@@ -43,6 +43,7 @@ let anim = null;
 function setView(v) {
   currentView = v;
   $("blackboard")?.setAttribute("viewBox", v.join(" "));
+  scheduleRef();
 }
 window.__setView = (x, y, w, h) => { stopAnim(); setView(parseView([x, y, w, h].join(","))); };
 function stopAnim() { if (anim) cancelAnimationFrame(anim); anim = null; }
@@ -143,6 +144,7 @@ function applyVisibility() {
   if (mode === "manual" && shown >= maxStep && !playing) mode = "live";
   for (const g of itemGroups()) g.style.visibility = stepOf(g) > shown && !g.dataset.revealing ? "hidden" : "";
   updateStepUI();
+  scheduleRef();
 }
 function updateStepUI() {
   const el = $("step-indicator");
@@ -362,7 +364,7 @@ function installNavigation() {
     if (e.ctrlKey || e.metaKey) zoomAt(Math.exp(e.deltaY * unit * 0.003), e.clientX, e.clientY);
     else panBy(e.deltaX * unit, e.deltaY * unit);
   }, { passive: false });
-  let drag = null;
+  let drag = null, pressMoved = false;
   surface.addEventListener("pointerdown", (e) => {
     if (e.button !== 0 || e.target.closest("input,button,a")) return;
     drag = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
@@ -370,16 +372,23 @@ function installNavigation() {
     surface.classList.add("dragging");
   });
   surface.addEventListener("pointermove", (e) => {
+    if (e.pointerType !== "touch") refHover(e.clientX, e.clientY);
     if (!drag || e.pointerId !== drag.id) return;
     if (!drag.moved && Math.hypot(drag.x - e.clientX, drag.y - e.clientY) < 3) return;
-    if (!drag.moved) { drag.moved = true; manual(); }
+    if (!drag.moved) { drag.moved = true; manual(); refDragging(true); }
     panBy(drag.x - e.clientX, drag.y - e.clientY);
     drag.x = e.clientX; drag.y = e.clientY;
   });
-  const end = (e) => { if (drag && e.pointerId === drag.id) { drag = null; surface.classList.remove("dragging"); } };
+  const end = (e) => { if (drag && e.pointerId === drag.id) { pressMoved = drag.moved; drag = null; surface.classList.remove("dragging"); refDragging(false); } };
   surface.addEventListener("pointerup", end);
   surface.addEventListener("pointercancel", end);
-  surface.addEventListener("dblclick", () => setFollow(true));
+  surface.addEventListener("pointerleave", () => refLeave());
+  window.addEventListener("resize", () => scheduleRef());
+  // A click on an item copies its reference (after a short wait, so the first
+  // click of a double-click does not copy); a drag that ends on an item does not.
+  surface.addEventListener("click", (e) => { if (!pressMoved) refClick(e); });
+  surface.addEventListener("mousedown", (e) => { if (e.detail > 1) cancelCopy(); });
+  surface.addEventListener("dblclick", () => { cancelCopy(); setFollow(true); });
   // Safari trackpad pinch.
   let gestureStart = 1;
   surface.addEventListener("gesturestart", (e) => { e.preventDefault(); manual(); gestureStart = e.scale; });
@@ -717,6 +726,135 @@ window.__boardLint = (home = { x: 0, y: 0, w: BOARD.w, h: BOARD.h }) => {
   return { items, issues };
 };
 
+/* ---------- item references (hover label, click to copy) ---------- */
+// The learner is view-only and talks to Pi in the terminal, so every item has a
+// reference they can type: resting the pointer on an item shows a quiet
+// "step 4 · eq2 · ch1" label next to it, and a click (not a drag) copies
+// "step 4, eq2 (chapter ch1)". Nothing is sent to the server and the board is
+// not changed. Snapshot pages (nofollow) never show it.
+const REFS = !NO_FOLLOW;
+const REF_SLACK = 5; // px around an item that still count as pointing at it
+const COPY_DELAY = 250; // ms; a second click inside this is a double-click (Follow), not a copy
+let refPoint = null; // last hover position in client px; null while the pointer is off the board
+let refDrag = false; // a drag is panning the board: no label
+let refShown = false, refFrame = 0, copyTimer = 0, toastTimer = 0;
+function itemRef(g) {
+  const step = Number(g.dataset.step);
+  return { id: g.dataset.id, step: Number.isInteger(step) && step > 0 ? step : null, chapter: g.dataset.chapter || null };
+}
+const refText = (r) => `${r.step ? `step ${r.step}, ` : ""}${r.id}${r.chapter ? ` (chapter ${r.chapter})` : ""}`;
+function segDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  const t = l2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0;
+  return Math.hypot(px - ax - t * dx, py - ay - t * dy);
+}
+/** How near the pointer (client px) is to item group g: { on, d, area, rect }, or null when it is not near. */
+function hitItem(g, x, y) {
+  if (g.style.visibility === "hidden") return null; // a step not shown yet
+  const box = g.dataset.kind === "equation" ? g.querySelector(".formula") : g;
+  const rect = box?.getBoundingClientRect();
+  if (!rect || (!rect.width && !rect.height)) return null;
+  const out = Math.hypot(Math.max(rect.left - x, 0, x - rect.right), Math.max(rect.top - y, 0, y - rect.bottom));
+  if (out > REF_SLACK) return null;
+  // Lines, arrows and strokes: measure to the stroke itself, not to their mostly empty box.
+  const strokes = g.dataset.kind === "mark" ? [...g.querySelectorAll("polyline,polygon")] : [];
+  if (!strokes.length) return { on: out === 0, d: out, area: rect.width * rect.height, rect };
+  let d = Infinity, len = 0, half = 1;
+  for (const el of strokes) {
+    const m = el.getScreenCTM(), list = el.points;
+    if (!m || !list) continue;
+    half = Math.max(half, ((Number(el.getAttribute("stroke-width")) || 2) * Math.hypot(m.a, m.b)) / 2);
+    const p = [];
+    for (let i = 0; i < list.numberOfItems; i++) { const q = list.getItem(i); p.push(new DOMPoint(q.x, q.y).matrixTransform(m)); }
+    if (el.tagName === "polygon" && p.length > 2) p.push(p[0]);
+    for (let i = 1; i < p.length; i++) {
+      d = Math.min(d, segDist(x, y, p[i - 1].x, p[i - 1].y, p[i].x, p[i].y));
+      len += Math.hypot(p[i].x - p[i - 1].x, p[i].y - p[i - 1].y);
+    }
+  }
+  const reach = half + REF_SLACK;
+  return d > reach ? null : { on: d <= half + 2, d, area: Math.max(1, len) * reach * 2, rect };
+}
+/** The item the pointer is on, preferring the most specific (smallest) one; ties go to the one drawn on top. */
+function pickItem(x, y) {
+  let best = null;
+  for (const g of itemGroups()) {
+    const h = hitItem(g, x, y);
+    if (h && (!best || (h.on !== best.on ? h.on : h.on ? h.area <= best.area : h.d <= best.d))) best = { ...h, g };
+  }
+  return best;
+}
+function showRef(hit) {
+  const label = $("item-ref"), outline = $("item-outline");
+  if (!label || !outline) return;
+  $("surface")?.classList.toggle("over-item", !!hit);
+  refShown = !!hit;
+  if (!hit) { label.classList.remove("show"); outline.classList.remove("show"); return; }
+  const ref = itemRef(hit.g), key = refText(ref);
+  if (label.dataset.ref !== key) {
+    const parts = [];
+    if (ref.step) { const s = document.createElement("span"); s.className = "ref-step"; s.textContent = `step ${ref.step}`; parts.push(s, " · "); }
+    parts.push(ref.id);
+    if (ref.chapter) parts.push(" · ", ref.chapter);
+    label.replaceChildren(...parts); // ids are text, never HTML
+    label.dataset.ref = key;
+  }
+  // Sit just above the item's top-left corner; if that is off screen, sit by the pointer.
+  const r = hit.rect, w = label.offsetWidth, h = label.offsetHeight, W = innerWidth, H = innerHeight;
+  let x = r.left, y = r.top - h - 6;
+  if (y < 4 || r.left < 0 || r.left > W - 24) { x = (refPoint?.x ?? r.left) + 14; y = (refPoint?.y ?? r.top) + 18; }
+  x = Math.max(4, Math.min(W - w - 4, x)); y = Math.max(4, Math.min(H - h - 4, y));
+  label.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+  outline.style.transform = `translate(${Math.round(r.left - 3)}px, ${Math.round(r.top - 3)}px)`;
+  outline.style.width = `${Math.round(r.width + 6)}px`;
+  outline.style.height = `${Math.round(r.height + 6)}px`;
+  label.classList.add("show"); outline.classList.add("show");
+}
+/** Re-check what is under the pointer on the next frame (pointer moved, view moved, items changed). */
+function scheduleRef() {
+  if (!REFS || refFrame || (!refPoint && !refShown)) return;
+  refFrame = requestAnimationFrame(() => { refFrame = 0; showRef(refPoint && !refDrag ? pickItem(refPoint.x, refPoint.y) : null); });
+}
+function refHover(x, y) { if (REFS) { refPoint = { x, y }; scheduleRef(); } }
+function refLeave() { refPoint = null; scheduleRef(); }
+function refDragging(on) { refDrag = on; if (on) showRef(null); else scheduleRef(); }
+function cancelCopy() { clearTimeout(copyTimer); copyTimer = 0; }
+function refClick(e) {
+  cancelCopy();
+  if (!REFS || e.detail > 1) return; // the second click of a double-click means Follow
+  const hit = pickItem(e.clientX, e.clientY);
+  if (!hit) return;
+  const text = refText(itemRef(hit.g));
+  copyTimer = setTimeout(() => { copyTimer = 0; copyRef(text); }, COPY_DELAY);
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  // No async clipboard (or it was refused): copy from a hidden, read-only textarea.
+  const ta = document.createElement("textarea"), prev = document.activeElement;
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.setAttribute("aria-hidden", "true");
+  ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none";
+  document.body.appendChild(ta);
+  let ok = false;
+  try { ta.focus({ preventScroll: true }); ta.select(); ok = document.execCommand("copy"); } catch {}
+  ta.remove();
+  if (prev && prev !== document.body) prev.focus?.({ preventScroll: true });
+  return ok;
+}
+async function copyRef(text) {
+  const ok = await copyText(text);
+  toast(ok ? `Copied: ${text}` : `Could not copy. Type: ${text}`, ok ? 2000 : 5000);
+}
+function toast(text, ms) {
+  const el = $("toast");
+  if (!el) return;
+  el.textContent = text;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), ms);
+}
+
 /* ---------- wiring ---------- */
 let root, lastData;
 function render(data) {
@@ -727,6 +865,7 @@ function render(data) {
   flushSync(() => root.render(<Board board={data.board} revision={data.revision} />));
   syncCamera(data.board, first);
   onRendered(data.board, first);
+  scheduleRef();
 }
 const sync = new BoardSync({ request, status, render: (data) => render(data), conflict: (message) => { $("conflict-message").textContent = message; $("conflict").hidden = false; } });
 const guarded = (fn) => (...args) => Promise.resolve().then(() => fn(...args)).catch((e) => status(e.message));
