@@ -1,7 +1,7 @@
 /** Exercise the installed Pi loader and an in-process pi session, without credentials, network providers or configuration changes. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import path from "node:path";
@@ -57,6 +57,19 @@ assert.ok(def("board_update").description.length < 1000, `board_update descripti
 assert.ok(sizes.board_update < 9000, `board_update: ${sizes.board_update}`);
 assert.ok(total < 12000, `all board tools: ${total}`);
 console.log(`sizes (description + schema): ${JSON.stringify(sizes)}; total ${total}; active before board_open ${sizes.board_open}`);
+
+// One implementation: the MCP server (mcp/server.mjs) builds the same tools from tools.mjs with the
+// `typebox` package instead of pi's Type. Names, labels, descriptions, annotations and JSON schemas
+// must match what pi registered, so the sizes above are also what an MCP client sees.
+const shared = await import(pathToFileURL(path.join(root, "tools.mjs")).href);
+const mcpSchemas = shared.buildSchemas((await import("typebox")).Type);
+assert.deepEqual(shared.TOOLS.map((t) => t.name), [...ext.tools.keys()]);
+for (const t of shared.TOOLS) {
+  assert.equal(def(t.name).description, t.description, t.name);
+  assert.equal(def(t.name).label, t.label, t.name);
+  assert.deepEqual(def(t.name).annotations, t.annotations, t.name);
+  assert.equal(JSON.stringify(mcpSchemas[t.name]), JSON.stringify(def(t.name).parameters), `${t.name}: MCP schema differs from pi's`);
+}
 
 const notices = [];
 const ctx = {
@@ -196,7 +209,7 @@ try {
   assert.match(refused.content[0].text, /Could not activate the board tools: runtime not ready/);
   assert.ok(refused.content[0].text.includes(firstUrl));
   console.log(
-    "PASS: actual Pi loader; command/tool registration; deferred board tools; size budgets; board_docs topics; board_teaching only in the learning folder; /board export completion and its not-running path; concurrent lazy start; read/update/conflict; authenticated HTTP; stop; board_open and /board open activate the tools idempotently.",
+    "PASS: actual Pi loader; command/tool registration; deferred board tools; size budgets; MCP schemas identical to pi's; board_docs topics; board_teaching only in the learning folder; /board export completion and its not-running path; concurrent lazy start; read/update/conflict; authenticated HTTP; stop; board_open and /board open activate the tools idempotently.",
   );
 } finally {
   for (const handler of ext.handlers.get("session_shutdown") ?? []) {
@@ -297,5 +310,40 @@ if (!sdk.createAgentSession || !sdk.DefaultResourceLoader || !ai.fauxProvider) {
     await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
     session.dispose();
   }
+}
+/*
+ * Installed as a package (`pi install <folder>` adds it to the settings' packages), pi also checks
+ * package.json: host-provided packages (typebox, pi-ai, ...) listed in `dependencies` give an
+ * extension warning. The MCP server's typebox is an optionalDependency for that reason. Load this
+ * folder the way an install does and expect no warnings; a stand-in package with typebox in
+ * `dependencies` shows that the check is live.
+ */
+if (!sdk.DefaultResourceLoader || !sdk.SettingsManager?.inMemory) {
+  console.log("SKIP: this pi build has no DefaultResourceLoader; package manifest warnings not checked.");
+} else {
+  const loadPackage = async (dir) => {
+    const loader = new sdk.DefaultResourceLoader({
+      cwd: dir,
+      agentDir: mkdtempSync(path.join(tmpdir(), "math-board-agent-")),
+      settingsManager: sdk.SettingsManager.inMemory({ packages: [dir] }),
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+    });
+    await loader.reload();
+    return loader.getExtensions();
+  };
+  const installed = await loadPackage(root);
+  assert.deepEqual(installed.errors, []);
+  assert.deepEqual(installed.warnings ?? [], []);
+  assert.deepEqual(installed.extensions.map((e) => e.path), [path.join(root, "index.ts")]);
+  const control = mkdtempSync(path.join(tmpdir(), "math-board-control-"));
+  writeFileSync(path.join(control, "package.json"), JSON.stringify({ name: "control", type: "module", pi: { extensions: ["./ext.mjs"] }, dependencies: { typebox: "*" } }));
+  writeFileSync(path.join(control, "ext.mjs"), "export default function () {}\n");
+  const warned = await loadPackage(control);
+  assert.equal(warned.warnings?.length, 1);
+  assert.match(warned.warnings[0].warning, /not dependencies: typebox/);
+  console.log("PASS: installed as a package, pi reports no manifest warnings (a control package with typebox in dependencies does warn).");
 }
 if (subagentName !== undefined) process.env.PI_SUBAGENT_NAME = subagentName;
