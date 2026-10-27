@@ -94,9 +94,15 @@ test("safe math and labels cannot execute HTML or create trusted links", async (
 
 test("quiet controls stay hidden until hover and scene remains view-only", async ({ page }) => {
   await ready(page);
+  // Park the pointer outside the viewport first: some headless builds (Linux CI) start it at
+  // (0,0), which already counts as hovering the body and fades the controls in.
+  await page.mouse.move(-1, -1);
   await expect(page.locator("nav")).toHaveCSS("opacity", "0");
   await page.locator("body").hover();
   await expect(page.locator("#btn-save")).toBeVisible();
+  await expect(page.locator("nav")).toHaveCSS("opacity", "0.86");
+  await page.mouse.move(-1, -1);
+  await expect(page.locator("nav")).toHaveCSS("opacity", "0");
   server.update({ baseRevision: server.revision, title: "Changed remotely" });
   await expect(page.locator("#board-title")).toHaveText("Changed remotely");
 });
