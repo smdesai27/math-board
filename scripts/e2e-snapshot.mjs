@@ -6,7 +6,7 @@ import path from "node:path";
 // Isolated data dir: never read or overwrite the user's saves/autosave.
 process.env.PI_MATH_BOARD_DATA_DIR ??= (await import("node:fs")).mkdtempSync((await import("node:path")).join((await import("node:os")).tmpdir(), "math-board-test-"));
 const root = fileURLToPath(new URL("../", import.meta.url));
-const host = path.join(execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim(), "@earendil-works/pi-coding-agent");
+const host = process.env.PI_HOST_ROOT || path.join(execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim(), "@earendil-works/pi-coding-agent");
 const { loadExtensions } = await import(pathToFileURL(path.join(host, "dist/core/extensions/loader.js")));
 const ext = (await loadExtensions([path.join(root, "index.ts")], root)).extensions[0];
 const tool = (n) => ext.tools.get(n).definition;
