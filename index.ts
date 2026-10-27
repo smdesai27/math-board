@@ -29,6 +29,9 @@
  *     KaTeX with trust:false and expansion limits; labels use textContent.
  *   - Saves persist as JSON under the package's own .data/ directory, or under
  *     $PI_MATH_BOARD_DATA_DIR when set (tests always set it).
+ *   - `/board export [name]` (export.mjs) writes the running board to
+ *     <cwd>/viz/ only when the user types it: never on shutdown, autosave or
+ *     from a model tool, and it never starts a board server.
  */
 
 import { StringEnum, Type } from "@earendil-works/pi-ai";
@@ -289,13 +292,13 @@ const BOARD_DOCS: Record<DocTopic, string> = {
 /*
  * Pi re-transpiles this file on /reload, but plain .mjs files are loaded by
  * Node's native ESM loader, whose cache cannot be cleared. Importing the server
- * through a URL that encodes the source files' mtimes gives every edited version
- * a fresh module instance (server.mjs forwards the same query to its siblings).
+ * (and export.mjs) through a URL that encodes the source files' mtimes gives every
+ * edited version a fresh module instance (server.mjs forwards the same query to its siblings).
  */
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // index.ts is included so the server's stale-source check is re-baselined on every reload.
-const SERVER_FILES = ["server.mjs", "scene.mjs", "snapshot.mjs", "shared/expr.mjs", "index.ts"];
-function loadServerModule(): Promise<any> {
+const SERVER_FILES = ["server.mjs", "scene.mjs", "snapshot.mjs", "shared/expr.mjs", "export.mjs", "index.ts"];
+function loadSourceModule(file: string): Promise<any> {
   const stamp = Math.max(
     ...SERVER_FILES.map((f) => {
       try {
@@ -305,13 +308,14 @@ function loadServerModule(): Promise<any> {
       }
     }),
   );
-  const url = `${pathToFileURL(path.join(HERE, "server.mjs")).href}?v=${Math.round(stamp)}`;
+  const url = `${pathToFileURL(path.join(HERE, file)).href}?v=${Math.round(stamp)}`;
   return nativeImport(url);
 }
 
 export default async function mathBoardExtension(pi: ExtensionAPI) {
   const { BoardServer, defaultDataDir, openBrowser, sanitizeShape, staleSources, cameraRect, searchIcons, iconIndex } =
-    await loadServerModule();
+    await loadSourceModule("server.mjs");
+  const { exportLesson, exportNotice, chapterRegion, overviewRegion } = await loadSourceModule("export.mjs");
 
 /** Warning line when board source files changed after this process loaded them. */
 function staleWarning(): string {
@@ -761,14 +765,10 @@ function staleWarning(): string {
       if (!region && params.chapter) {
         const c = (board.chapters ?? []).find((ch: any) => ch.id === params.chapter);
         if (!c) throw new Error(`unknown chapter "${params.chapter}"`);
-        region = { x: c.x, y: c.y, w: c.w, h: c.h };
+        region = chapterRegion(c);
       }
-      if (!region && params.overview && board.chapters?.length) {
-        const cs = board.chapters;
-        const x0 = Math.min(...cs.map((c: any) => c.x)) - 60, y0 = Math.min(...cs.map((c: any) => c.y)) - 80;
-        const x1 = Math.max(...cs.map((c: any) => c.x + c.w)) + 60, y1 = Math.max(...cs.map((c: any) => c.y + c.h)) + 60;
-        region = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-      }
+      // Region helpers are shared with /board export, so its PNGs match these snapshots.
+      if (!region && params.overview && board.chapters?.length) region = overviewRegion(board.chapters);
       region ??= cameraRect(board);
       const shot = await s.snapshots.capture({ region, width: params.width });
       const { items, issues } = shot.lint;
@@ -982,6 +982,7 @@ function staleWarning(): string {
       "  /board clear      clear board (add: equations, scene)",
       "  /board save [n]   persist board to disk (name, default 'default')",
       "  /board load [n]   load a saved board",
+      "  /board export [n] write the lesson to ./viz/board-<n>-<time>/: board.json, a PNG per chapter, lesson.md",
       "  /board status     show server status",
       "  /board stop       stop the board server",
     ].join("\n");
@@ -996,6 +997,7 @@ function staleWarning(): string {
         "clear",
         "save",
         "load",
+        "export",
         "status",
         "stop",
         "help",
@@ -1006,6 +1008,8 @@ function staleWarning(): string {
     handler: async (args, ctx) => {
       const [verb, ...rest] = args.trim().split(/\s+/).filter(Boolean);
       const nameArg = rest[0];
+      // `/board export Newton's laws` names the export with every word after the verb.
+      const exportName = rest.join(" ");
 
       try {
         switch (verb ?? "open") {
@@ -1053,6 +1057,36 @@ function staleWarning(): string {
               `Loaded "${nameArg ?? "default"}" (rev ${s.revision}). Use /board open to view.`,
               "info",
             );
+            return;
+          }
+          case "export": {
+            // Manual only: this command is the sole caller of exportLesson. It reads the
+            // running board and never starts one.
+            const s = server;
+            if (s?.starting) await s.starting.catch(() => {});
+            if (!s?.url) {
+              ctx.ui.notify(
+                "Board not running, nothing to export (start it with /board or /board load <name>).",
+                "info",
+              );
+              return;
+            }
+            const board = s.getState();
+            const revision = s.revision;
+            const result = await exportLesson({
+              board,
+              revision,
+              name: exportName,
+              cwd: ctx.cwd,
+              // The capture board_snapshot uses: the server's headless page, a board region, a width.
+              snapshot: async (opts: { region: { x: number; y: number; w: number; h: number }; width: number }) =>
+                (await s.snapshots.capture(opts)).png,
+            });
+            const changed =
+              s.revision !== revision
+                ? `\n  The board changed during the export (revision ${revision} -> ${s.revision}); images may show the newer state.`
+                : "";
+            ctx.ui.notify(exportNotice(result) + changed, result.skipped.length || changed ? "warning" : "info");
             return;
           }
           case "status": {

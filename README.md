@@ -21,6 +21,7 @@ This repository is a local Pi package: `package.json` declares `"pi": { "extensi
 /board            # open the board in your browser (also /board open)
 /board status     # server URL, revision, autosave/chapters info
 /board save name  # named snapshot      /board load name   # restore it
+/board export [name]  # write the lesson to ./viz/: board.json, PNGs, lesson.md
 /board clear      # clear everything (or: /board clear equations|scene)
 /board stop       # stop the server
 ```
@@ -88,6 +89,7 @@ All artifacts accept `chapter`, `z`, `opacity`, `label`, `step`, `reveal`, `dura
 
 - **Autosave**: every change is written (debounced, atomically) to `.data/autosave.json`; a fresh board server restores it on start, so `/reload` or restarting Pi keeps the board.
 - **Named snapshots**: `/board save name`, `board_save`, or the Save button write `.data/saves/<name>.json`. Loading re-validates everything; unsupported items are skipped rather than failing the load.
+- **Lesson export**: `/board export [name]` writes the running board to `viz/board-<name>-<YYYYMMDD-HHMM>/` in Pi's current folder, adding `-2`, `-3`, … rather than overwriting: `board.json` (the named-save format: copied to `saves/<name>.json` in the data directory it loads with `/board load <name>`), `chapter-<id>.png` per chapter (1600 px, rendered like `board_snapshot`), `home.png` for items outside the chapters (unless a chapter covers the home board), `overview.png` when there is more than one region, and `lesson.md`, a note with standard markdown image links for Obsidian and GitHub. It is manual only: it runs when you type it, never on autosave, shutdown or from a model tool, and it never starts a board server. Without a headless browser it still writes `board.json` and `lesson.md` and says why the images are missing.
 - **Data directory**: `.data/` inside the package (git-ignored, so boards never end up in commits), unless `PI_MATH_BOARD_DATA_DIR` points elsewhere. The tests and scripts always use temporary directories, so they never touch real saves.
 - Limits: 200 chapters, 1000 equations, 5000 shapes, 100 artifacts per update, 6 MiB per board, 128 KiB per SVG.
 
@@ -114,7 +116,7 @@ npm run build:icons    # (re)build the icon library (network)
 npm test               # unit/HTTP/hardening tests
 npm run test:browser   # Playwright browser tests
 npm run test:load      # real Pi loader + /reload regression
-node scripts/e2e-snapshot.mjs   # end-to-end: update → layout check → snapshot
+node scripts/e2e-snapshot.mjs   # end-to-end: update → layout check → snapshot → /board export
 ```
 
 `npm run test:load` and `scripts/e2e-snapshot.mjs` load the extension through Pi's real loader, so they need Pi installed globally (`npm install -g @earendil-works/pi-coding-agent`; they find it with `npm root -g`) or `PI_HOST_ROOT` set to an installed `@earendil-works/pi-coding-agent` package directory:
@@ -123,6 +125,6 @@ node scripts/e2e-snapshot.mjs   # end-to-end: update → layout check → snapsh
 PI_HOST_ROOT=/path/to/node_modules/@earendil-works/pi-coding-agent npm run test:load
 ```
 
-Set `PI_HOST_ROOT` as well when `npm root -g` prints a masked path (npm 11 hides UUID-like path segments). The browser tests need Playwright's Chromium (`npx playwright install chromium`); the snapshot script uses it too, or the system Chrome, and writes `/tmp/board-e2e.png` unless given another path. CI (`.github/workflows/ci.yml`) runs `npm test`, `test:browser` and `test:load` (against pi 1.4.0) on Node 22 for every push and pull request to `main`.
+Set `PI_HOST_ROOT` as well when `npm root -g` prints a masked path (npm 11 hides UUID-like path segments). The browser tests need Playwright's Chromium (`npx playwright install chromium`); the snapshot script uses it too, or the system Chrome, and writes `/tmp/board-e2e.png` unless given another path; its `/board export` goes to a temporary folder. CI (`.github/workflows/ci.yml`) runs `npm test`, `test:browser` and `test:load` (against pi 1.4.0) on Node 22 for every push and pull request to `main`.
 
 Research notes on prior art (tldraw agent kit, TheoremExplainAgent, Code2Video, HeyTutor, Manim-style timelines, etc.) are in `docs/prior-art.md`.

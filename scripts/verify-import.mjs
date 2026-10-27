@@ -31,6 +31,11 @@ const ext = result.extensions[0];
 const BOARD_TOOLS = ["board_docs", "board_library", "board_read", "board_save", "board_snapshot", "board_update"];
 assert.deepEqual([...ext.tools.keys()].sort(), [...BOARD_TOOLS, "board_open"].sort());
 assert.ok(ext.commands.has("board"));
+// /board export is a command only (no model tool), and it completes like the other actions.
+const completions = async (prefix) => ((await ext.commands.get("board").getArgumentCompletions(prefix)) ?? []).map((c) => c.value);
+assert.ok((await completions("")).includes("export"));
+assert.deepEqual(await completions("ex"), ["export"]);
+assert.ok(![...ext.tools.keys()].some((name) => /export/.test(name)));
 const def = (name) => ext.tools.get(name).definition;
 
 // Lazy activation. The loader result has no active set (pi's AgentSession activates direct and
@@ -108,6 +113,15 @@ result.runtime.setActiveTools = (names) => {
 try {
   await ext.commands.get("board").handler("status", ctx);
   assert.match(notices.at(-1).text, /not running/);
+  // /board export reads the running board only: with none it says so, starts nothing, writes nothing.
+  const exportCwd = mkdtempSync(path.join(tmpdir(), "math-board-export-"));
+  await ext.commands.get("board").handler("export Newton", { ...ctx, cwd: exportCwd });
+  assert.match(notices.at(-1).text, /^Board not running, nothing to export/);
+  assert.equal(existsSync(path.join(exportCwd, "viz")), false);
+  await ext.commands.get("board").handler("status", ctx);
+  assert.match(notices.at(-1).text, /Board server: not running/);
+  await ext.commands.get("board").handler("help", ctx);
+  assert.match(notices.at(-1).text, /\/board export \[n\]/);
   // Two parallel first calls share one lazy server.
   const [a, b] = await Promise.all([
     tool("board_read").execute("a", {}, undefined, undefined, ctx),
@@ -182,7 +196,7 @@ try {
   assert.match(refused.content[0].text, /Could not activate the board tools: runtime not ready/);
   assert.ok(refused.content[0].text.includes(firstUrl));
   console.log(
-    "PASS: actual Pi loader; command/tool registration; deferred board tools; size budgets; board_docs topics; board_teaching only in the learning folder; concurrent lazy start; read/update/conflict; authenticated HTTP; stop; board_open and /board open activate the tools idempotently.",
+    "PASS: actual Pi loader; command/tool registration; deferred board tools; size budgets; board_docs topics; board_teaching only in the learning folder; /board export completion and its not-running path; concurrent lazy start; read/update/conflict; authenticated HTTP; stop; board_open and /board open activate the tools idempotently.",
   );
 } finally {
   for (const handler of ext.handlers.get("session_shutdown") ?? []) {
