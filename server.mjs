@@ -35,7 +35,7 @@ const { Snapshotter } = await import(new URL(`./snapshot.mjs${VERSION_QUERY}`, i
 const { compileExpr } = await import(new URL(`./shared/expr.mjs${VERSION_QUERY}`, import.meta.url).href);
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { homedir, platform } from "node:os";
+import { platform } from "node:os";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -154,15 +154,8 @@ const JSON_BODY_LIMIT_BYTES = MAX_BODY_BYTES;
 function defaultDataDir() {
   // Tests and scripts point this elsewhere so they never touch real saves/autosave.
   if (process.env.PI_MATH_BOARD_DATA_DIR) return process.env.PI_MATH_BOARD_DATA_DIR;
-  // Keep saves under the extension's own directory, not global config.
-  return path.join(
-    homedir(),
-    ".pi",
-    "agent",
-    "extensions",
-    "math-board",
-    ".data",
-  );
+  // Keep saves under the package's own directory (next to this file), wherever it is installed.
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), ".data");
 }
 
 function nowIso() {
