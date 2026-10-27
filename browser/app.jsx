@@ -42,8 +42,16 @@ let anim = null;
 // Apply the view straight to the DOM: panning must not re-render (and re-typeset) the board.
 function setView(v) {
   currentView = v;
-  $("blackboard")?.setAttribute("viewBox", v.join(" "));
+  const svg = $("blackboard");
+  svg?.setAttribute("viewBox", v.join(" "));
+  updateViewScale(svg);
   scheduleRef();
+}
+/** Board units per screen pixel as a CSS variable, for text that keeps a minimum on-screen size. */
+function updateViewScale(svg = $("blackboard")) {
+  const w = svg?.clientWidth, h = svg?.clientHeight;
+  if (!w || !h) return;
+  svg.style.setProperty("--view-scale", String(Math.max(currentView[2] / w, currentView[3] / h)));
 }
 window.__setView = (x, y, w, h) => { stopAnim(); setView(parseView([x, y, w, h].join(","))); };
 function stopAnim() { if (anim) cancelAnimationFrame(anim); anim = null; }
@@ -383,7 +391,7 @@ function installNavigation() {
   surface.addEventListener("pointerup", end);
   surface.addEventListener("pointercancel", end);
   surface.addEventListener("pointerleave", () => refLeave());
-  window.addEventListener("resize", () => scheduleRef());
+  window.addEventListener("resize", () => { updateViewScale(); scheduleRef(); });
   // A click on an item copies its reference (after a short wait, so the first
   // click of a double-click does not copy); a drag that ends on an item does not.
   surface.addEventListener("click", (e) => { if (!pressMoved) refClick(e); });
@@ -421,6 +429,10 @@ const FONTS = {
   sans: "system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif",
   mono: "ui-monospace, Menlo, Consolas, monospace",
 };
+// Serif for text drawn inside image artifacts (Mermaid, molecules): web fonts such as KaTeX_Main
+// cannot load there, so this is a system font, with lining figures (Georgia's old-style
+// figures make "A2", "CO2" or "COX-1" look like subscripts).
+const IMAGE_SERIF = "Charter, 'Bitstream Charter', 'Charis SIL', Cambria, 'Times New Roman', serif";
 function drawShape(s) {
   const color = s.color || "#e8e3d9", width = s.width || 2;
   const common = { opacity: s.opacity, strokeDasharray: s.dash };
@@ -475,6 +487,21 @@ function Formula({ eq, index }) {
 
 /* ---------- molecules (SMILES → 2D structure, offline) ---------- */
 const CHALK_THEME = { FOREGROUND: "#e8e3d9", BACKGROUND: "transparent", C: "#e8e3d9", O: "#ef6f6c", N: "#5fb3d9", F: "#8de0be", CL: "#8de0be", BR: "#f2a65a", I: "#c39bd3", P: "#f2a65a", S: "#f2c14e", B: "#f2a65a", SI: "#f2a65a", H: "#b9b4a8" };
+/**
+ * SmilesDrawer frames every structure in a square viewBox, so a wide molecule in a wide box (or a
+ * tall one in a tall box) uses half the space it was given and its atom labels come out small.
+ * Frame the drawn structure tightly instead, without zooming a tiny molecule past about 2x
+ * (60 px bonds).
+ */
+function fitMolecule(svg, width, height) {
+  let bb;
+  try { bb = svg.getBBox(); } catch { return; }
+  if (!(bb.width > 0 && bb.height > 0)) return;
+  const pad = 10, maxZoom = 2;
+  const w = Math.max(bb.width + 2 * pad, width / maxZoom), h = Math.max(bb.height + 2 * pad, height / maxZoom);
+  const cx = bb.x + bb.width / 2, cy = bb.y + bb.height / 2;
+  svg.setAttribute("viewBox", [cx - w / 2, cy - h / 2, w, h].map((v) => v.toFixed(2)).join(" "));
+}
 function renderMolecule(smiles, width, height) {
   return new Promise((resolve, reject) => {
     const ns = "http://www.w3.org/2000/svg";
@@ -485,10 +512,11 @@ function renderMolecule(smiles, width, height) {
     host.appendChild(svg); document.body.appendChild(host);
     const done = (fn) => (v) => { host.remove(); fn(v); };
     try {
-      const drawer = new SmilesDrawer.SvgDrawer({ width, height, padding: 24, bondThickness: 1.8, fontFamily: "Georgia, 'Times New Roman', serif", fontSizeLarge: 13, fontSizeSmall: 7, themes: { chalk: CHALK_THEME } });
+      const drawer = new SmilesDrawer.SvgDrawer({ width, height, padding: 24, bondThickness: 1.8, fontFamily: IMAGE_SERIF, fontSizeLarge: 13, fontSizeSmall: 7, themes: { chalk: CHALK_THEME } });
       SmilesDrawer.parse(smiles, (tree) => {
         try {
           drawer.draw(tree, svg, "chalk");
+          fitMolecule(svg, width, height);
           svg.setAttribute("xmlns", ns);
           done(resolve)(new XMLSerializer().serializeToString(svg));
         } catch (e) { done(reject)(new Error(`could not draw molecule: ${e?.message || e}`)); }
@@ -499,6 +527,11 @@ function renderMolecule(smiles, width, height) {
 
 /* ---------- plots (inline SVG so curves can be traced) ---------- */
 const PLOT_COLORS = ["#5fb3d9", "#f2c14e", "#ef6f6c", "#8de0be", "#c39bd3", "#e8e3d9"];
+// Plot chrome on black: axes stay quiet but clearly visible, tick and axis labels brighter
+// than the axes (readable at 1200 px), grid barely there.
+export const PLOT_INK = { axis: "#9b968a", tick: "#b9b4a6", label: "#cfcab9", grid: "#ffffff16" };
+// Black outline painted under label text: lines crossing a label stop short of the glyphs.
+const HALO = { stroke: "#000", strokeWidth: 4, strokeLinejoin: "round", paintOrder: "stroke" };
 function niceStep(span, target = 8) {
   const raw = span / target, mag = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / mag;
   return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * mag;
@@ -534,7 +567,9 @@ function Plot({ item }) {
     };
   }, [item]);
   const W = item.width, H = item.height;
-  const padL = 46, padR = 18, padT = item.title ? 34 : 14, padB = 34;
+  // The y-axis label sits above the plot area (a row of its own), so it never lands on the
+  // curve's maximum or a point label at the top of the axis.
+  const padL = 46, padR = 18, padT = (item.title ? 34 : 14) + (item.yLabel ? 24 : 0), padB = 34;
   const [x0, x1] = item.xRange || [-10, 10];
   let [y0, y1] = item.yRange || [NaN, NaN];
   if (!Number.isFinite(y0)) {
@@ -565,20 +600,20 @@ function Plot({ item }) {
   for (let v = Math.ceil(x0 / xs) * xs; v <= x1 + 1e-9; v += xs) xticks.push(v);
   for (let v = Math.ceil(y0 / ysStep) * ysStep; v <= y1 + 1e-9; v += ysStep) yticks.push(v);
   const axX = Math.min(Math.max(0, y0), y1), axY = Math.min(Math.max(0, x0), x1); // axes through 0 when visible
-  const muted = "#8a8578", font = { fontFamily: FONTS.serif };
+  const font = { fontFamily: FONTS.serif };
   const labels = [];
   const curves = compiled.functions.map((f, i) => {
     const color = f.color || PLOT_COLORS[i % PLOT_COLORS.length];
     const [a, b] = f.domain || [x0, x1];
     const segs = samplePath(f.fn, Math.max(a, x0), Math.min(b, x1), Math.max(200, Math.round(iw * 1.5)), sx, sy, y1 - y0);
-    if (f.label && segs.length) { const last = segs[segs.length - 1].filter(([, y]) => y >= top && y <= bottom).pop(); if (last) labels.push(<text key={`fl${i}`} x={Math.min(last[0] + 6, right - 4)} y={last[1] - 8} fill={color} fontSize="16" textAnchor={last[0] > right - 60 ? "end" : "start"} style={{ ...font, fontStyle: "italic" }}>{f.label}</text>); }
+    if (f.label && segs.length) { const last = segs[segs.length - 1].filter(([, y]) => y >= top && y <= bottom).pop(); if (last) labels.push(<text key={`fl${i}`} x={Math.min(last[0] + 6, right - 4)} y={last[1] - 8} fill={color} fontSize="16" textAnchor={last[0] > right - 60 ? "end" : "start"} {...HALO} style={{ ...font, fontStyle: "italic" }}>{f.label}</text>); }
     return segs.map((seg, j) => <polyline key={`f${i}-${j}`} points={pts(seg)} fill="none" stroke={color} strokeWidth={f.width || 3} strokeDasharray={f.dash} strokeLinejoin="round" strokeLinecap="round" />);
   });
   const params = compiled.parametric.map((f, i) => {
     const color = f.color || PLOT_COLORS[(i + compiled.functions.length) % PLOT_COLORS.length];
     const seg = [];
     for (let k = 0; k <= 600; k++) { const t = f.t[0] + ((f.t[1] - f.t[0]) * k) / 600, X = f.fx({ t }), Y = f.fy({ t }); if (Number.isFinite(X) && Number.isFinite(Y)) seg.push([sx(X), sy(Y)]); }
-    if (f.label && seg.length) labels.push(<text key={`pl${i}`} x={seg[seg.length - 1][0] + 6} y={seg[seg.length - 1][1] - 8} fill={color} fontSize="16" style={{ ...font, fontStyle: "italic" }}>{f.label}</text>);
+    if (f.label && seg.length) labels.push(<text key={`pl${i}`} x={seg[seg.length - 1][0] + 6} y={seg[seg.length - 1][1] - 8} fill={color} fontSize="16" {...HALO} style={{ ...font, fontStyle: "italic" }}>{f.label}</text>);
     return seg.length > 1 ? <polyline key={`p${i}`} points={pts(seg)} fill="none" stroke={color} strokeWidth={f.width || 3} strokeDasharray={f.dash} strokeLinejoin="round" /> : null;
   });
   const areas = compiled.areas.map((a, i) => {
@@ -586,26 +621,32 @@ function Plot({ item }) {
     const upper = [], lower = [];
     for (let k = 0; k <= n; k++) { const x = from + ((to - from) * k) / n, u = a.fn({ x }), l = a.lo({ x }); if (Number.isFinite(u) && Number.isFinite(l)) { upper.push([sx(x), sy(u)]); lower.push([sx(x), sy(l)]); } }
     const color = a.color || "#f2c14e";
-    return upper.length > 1 ? <polygon key={`a${i}`} points={pts([...upper, ...lower.reverse()])} fill={color} fillOpacity="0.22" stroke="none" /> : null;
+    return upper.length > 1 ? <polygon key={`a${i}`} points={pts([...upper, ...lower.reverse()])} fill={color} fillOpacity="0.26" stroke="none" /> : null;
   });
+  // Rough text width (serif, ~0.5 em per character) to keep the y label inside the plot's box.
+  const yLabelX = item.yLabel ? Math.min(Math.max(sx(axY), item.x + item.yLabel.length * 4.4 + 4), item.x + W - item.yLabel.length * 4.4 - 4) : 0;
   return <g className="plot">
     <defs><clipPath id={clipId}><rect x={left} y={top} width={iw} height={ih} /></clipPath></defs>
     {item.title ? <text x={item.x + W / 2} y={item.y + 22} fill="#e8e3d9" fontSize="20" textAnchor="middle" style={font}>{item.title}</text> : null}
-    {item.grid !== false ? <g stroke="#ffffff14" strokeWidth="1">{xticks.map((v) => <line key={`gx${v}`} x1={sx(v)} y1={top} x2={sx(v)} y2={bottom} />)}{yticks.map((v) => <line key={`gy${v}`} x1={left} y1={sy(v)} x2={right} y2={sy(v)} />)}</g> : null}
+    {item.grid !== false ? <g stroke={PLOT_INK.grid} strokeWidth="1">{xticks.map((v) => <line key={`gx${v}`} x1={sx(v)} y1={top} x2={sx(v)} y2={bottom} />)}{yticks.map((v) => <line key={`gy${v}`} x1={left} y1={sy(v)} x2={right} y2={sy(v)} />)}</g> : null}
     <g clipPath={`url(#${clipId})`}>{areas}</g>
-    {item.axes !== false ? <g stroke={muted} strokeWidth="1.6"><line x1={left} y1={sy(axX)} x2={right} y2={sy(axX)} /><line x1={sx(axY)} y1={top} x2={sx(axY)} y2={bottom} /></g> : null}
-    {item.ticks !== false ? <g fill={muted} fontSize="13" style={font}>
-      {xticks.filter((v) => Math.abs(v - axY) > xs / 2 || item.axes === false).map((v) => <text key={`tx${v}`} x={sx(v)} y={Math.min(sy(axX) + 18, bottom + 18)} textAnchor="middle">{fmtTick(v, xs)}</text>)}
-      {yticks.filter((v) => Math.abs(v - axX) > ysStep / 2 || item.axes === false).map((v) => <text key={`ty${v}`} x={Math.max(sx(axY) - 7, left - 7)} y={sy(v) + 4} textAnchor="end">{fmtTick(v, ysStep)}</text>)}
-    </g> : null}
-    {item.xLabel ? <text x={right} y={Math.min(sy(axX) + 32, bottom + 30)} fill={muted} fontSize="16" textAnchor="end" style={{ ...font, fontStyle: "italic" }}>{item.xLabel}</text> : null}
-    {item.yLabel ? <text x={sx(axY) + 8} y={top + 14} fill={muted} fontSize="16" style={{ ...font, fontStyle: "italic" }}>{item.yLabel}</text> : null}
+    {item.axes !== false ? <g className="plot-axes" stroke={PLOT_INK.axis} strokeWidth="1.6"><line x1={left} y1={sy(axX)} x2={right} y2={sy(axX)} /><line x1={sx(axY)} y1={top} x2={sx(axY)} y2={bottom} /></g> : null}
     <g clipPath={`url(#${clipId})`}>
-      {(item.hlines || []).map((h, i) => <line key={`h${i}`} x1={left} y1={sy(h.y)} x2={right} y2={sy(h.y)} stroke={h.color || muted} strokeWidth={h.width || 1.5} strokeDasharray={h.dash || "6 5"} />)}
-      {(item.vlines || []).map((v, i) => <line key={`v${i}`} x1={sx(v.x)} y1={top} x2={sx(v.x)} y2={bottom} stroke={v.color || muted} strokeWidth={v.width || 1.5} strokeDasharray={v.dash || "6 5"} />)}
+      {(item.hlines || []).map((h, i) => <line key={`h${i}`} x1={left} y1={sy(h.y)} x2={right} y2={sy(h.y)} stroke={h.color || PLOT_INK.axis} strokeWidth={h.width || 1.5} strokeDasharray={h.dash || "6 5"} />)}
+      {(item.vlines || []).map((v, i) => <line key={`v${i}`} x1={sx(v.x)} y1={top} x2={sx(v.x)} y2={bottom} stroke={v.color || PLOT_INK.axis} strokeWidth={v.width || 1.5} strokeDasharray={v.dash || "6 5"} />)}
       {curves}{params}
     </g>
-    {(item.points || []).map((p, i) => <g key={`pt${i}`}><circle cx={sx(p.x)} cy={sy(p.y)} r={p.size || 5} fill={p.color || "#e8e3d9"} />{p.label ? <text x={sx(p.x) + 9} y={sy(p.y) - 9} fill={p.color || "#e8e3d9"} fontSize="16" style={font}>{p.label}</text> : null}</g>)}
+    {/* Labels go on top of the curves with a thin black halo, so a curve or a dashed marker
+        crossing a tick label interrupts the line instead of striking through the text. */}
+    {item.ticks !== false ? <g className="plot-ticks" fill={PLOT_INK.tick} fontSize="14" {...HALO} style={font}>
+      {xticks.filter((v) => Math.abs(v - axY) > xs / 2 || item.axes === false).map((v) => <text key={`tx${v}`} x={sx(v)} y={Math.min(sy(axX) + 19, bottom + 19)} textAnchor="middle">{fmtTick(v, xs)}</text>)}
+      {yticks.filter((v) => Math.abs(v - axX) > ysStep / 2 || item.axes === false).map((v) => <text key={`ty${v}`} x={Math.max(sx(axY) - 7, left - 7)} y={sy(v) + 5} textAnchor="end">{fmtTick(v, ysStep)}</text>)}
+    </g> : null}
+    {(item.hlines || []).map((h, i) => h.label && h.y >= y0 && h.y <= y1 ? <text key={`hl${i}`} x={right - 4} y={sy(h.y) - 7} fill={h.color || PLOT_INK.label} fontSize="15" textAnchor="end" {...HALO} style={{ ...font, fontStyle: "italic" }}>{h.label}</text> : null)}
+    {(item.vlines || []).map((v, i) => v.label && v.x >= x0 && v.x <= x1 ? <text key={`vl${i}`} x={sx(v.x) + 5} y={top + 15} fill={v.color || PLOT_INK.label} fontSize="15" {...HALO} style={{ ...font, fontStyle: "italic" }}>{v.label}</text> : null)}
+    {item.xLabel ? <text className="plot-xlabel" x={right} y={Math.min(sy(axX) + 34, bottom + 31)} fill={PLOT_INK.label} fontSize="17" textAnchor="end" {...HALO} style={{ ...font, fontStyle: "italic" }}>{item.xLabel}</text> : null}
+    {item.yLabel ? <text className="plot-ylabel" x={yLabelX} y={top - 8} fill={PLOT_INK.label} fontSize="17" textAnchor="middle" {...HALO} style={{ ...font, fontStyle: "italic" }}>{item.yLabel}</text> : null}
+    {(item.points || []).map((p, i) => <g key={`pt${i}`}><circle cx={sx(p.x)} cy={sy(p.y)} r={p.size || 5} fill={p.color || "#e8e3d9"} />{p.label ? <text x={sx(p.x) + 9} y={sy(p.y) - 9} fill={p.color || "#e8e3d9"} fontSize="16" {...HALO} style={font}>{p.label}</text> : null}</g>)}
     {labels}
   </g>;
 }
@@ -613,7 +654,67 @@ function Plot({ item }) {
 /* ---------- artifacts ---------- */
 // htmlLabels:false keeps labels as SVG <text>; HTML labels (foreignObject) can
 // vanish when the diagram is displayed through an <image> data URI.
-mermaid.initialize({ startOnLoad: false, securityLevel: "strict", suppressErrorRendering: true, theme: "dark", htmlLabels: false, flowchart: { htmlLabels: false }, class: { htmlLabels: false }, state: { htmlLabels: false } });
+// Chalk theme: Mermaid's dark theme recoloured for the board. Serif text like the rest of the
+// board (a system font, so the text measured here is the text drawn inside the image), near-black
+// nodes with chalk outlines, chalk edges, and opaque black edge-label backgrounds so an edge never
+// strikes through its label.
+export const MERMAID_FONT_PX = 18;
+const MIN_TEXT_PX = 12; // board px; smaller diagram text is reported by the layout check
+const MERMAID_THEME = {
+  darkMode: true, background: "#000000", fontFamily: IMAGE_SERIF, fontSize: `${MERMAID_FONT_PX}px`,
+  primaryColor: "#161616", primaryTextColor: "#e8e3d9", primaryBorderColor: "#bdb8a8",
+  secondaryColor: "#1c1c1c", secondaryTextColor: "#e8e3d9", secondaryBorderColor: "#8a8578",
+  tertiaryColor: "#121212", tertiaryTextColor: "#e8e3d9", tertiaryBorderColor: "#8a8578",
+  mainBkg: "#161616", nodeBorder: "#bdb8a8", nodeTextColor: "#e8e3d9", textColor: "#e8e3d9", titleColor: "#e8e3d9",
+  lineColor: "#c7c5ad", edgeLabelBackground: "#000000", clusterBkg: "#0d0d0d", clusterBorder: "#6f6b61",
+  actorBkg: "#161616", actorBorder: "#bdb8a8", actorTextColor: "#e8e3d9", actorLineColor: "#8a8578", signalColor: "#c7c5ad", signalTextColor: "#e8e3d9",
+  labelBoxBkgColor: "#161616", labelBoxBorderColor: "#bdb8a8", labelTextColor: "#e8e3d9", loopTextColor: "#e8e3d9",
+  noteBkgColor: "#2a2618", noteBorderColor: "#f2c14e", noteTextColor: "#e8e3d9", activationBkgColor: "#2a2a2a", activationBorderColor: "#bdb8a8",
+  // Section colours (pie slices, mindmap branches, timeline sections, journeys): the board's
+  // chalk accents at mid tone, all carrying light labels. Mermaid's dark defaults include
+  // near-black slices and black or grey-on-grey labels.
+  ...Object.fromEntries(["#2c6178", "#7a6127", "#7a3836", "#3a6e5c", "#5e4a6a", "#5c584e", "#1f4a5c", "#5c4a1d", "#5c2a29", "#2b5245", "#47384f", "#45423b"]
+    .flatMap((c, i) => [[`cScale${i}`, c], [`cScaleLabel${i}`, "#e8e3d9"]])),
+  scaleLabelColor: "#e8e3d9",
+  ...Object.fromEntries(["#4a4740", "#2c6178", "#7a6127", "#7a3836", "#3a6e5c", "#5e4a6a", "#1f4a5c", "#5c4a1d"]
+    .flatMap((c, i) => [[`git${i}`, c], [`gitBranchLabel${i}`, "#e8e3d9"]])),
+  pieOpacity: "0.9", pieStrokeColor: "#000000", pieOuterStrokeColor: "#8a8578", pieSectionTextColor: "#e8e3d9",
+  pieTitleTextColor: "#e8e3d9", pieLegendTextColor: "#e8e3d9",
+};
+const MERMAID_CSS = [
+  ".edgeLabel rect,.edgeLabel .background,.labelBkg{opacity:1!important;fill:#000!important;background-color:#000!important}",
+  // Not .edge-thickness-normal: ER lines size their (stroke-width relative) markers by it.
+  // Thick links (==>, which carry both thickness classes) keep their 3.5 px.
+  ".flowchart-link:not(.edge-thickness-thick),.relation,.transition{stroke-width:1.8px!important}",
+  ".node rect,.node circle,.node ellipse,.node polygon,.node path{stroke-width:1.6px!important}",
+].join("\n");
+mermaid.initialize({ startOnLoad: false, securityLevel: "strict", suppressErrorRendering: true, theme: "dark", themeVariables: MERMAID_THEME, themeCSS: MERMAID_CSS, htmlLabels: false, flowchart: { htmlLabels: false }, class: { htmlLabels: false }, state: { htmlLabels: false } });
+/**
+ * Finish a rendered Mermaid SVG for the board: arrowheads scaled to the thicker chalk edges
+ * (Mermaid draws 8 px heads for 1 px lines), and the diagram's natural size, which the layout
+ * check uses to warn when a diagram is shrunk until its text is too small to read.
+ */
+function tuneMermaid(svg) {
+  const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+  const root = doc.documentElement;
+  if (root.nodeName !== "svg" || doc.querySelector("parsererror")) return { svg, size: null };
+  const k = 1.4;
+  for (const m of root.querySelectorAll("marker")) {
+    // Flowchart arrowheads only; other diagram types already size their markers for their lines.
+    if (m.getAttribute("markerUnits") !== "userSpaceOnUse" || !/-point(End|Start)$/.test(m.id)) continue;
+    const vb = (m.getAttribute("viewBox") || "").split(/[\s,]+/).map(Number);
+    const mw = Number(m.getAttribute("markerWidth")), mh = Number(m.getAttribute("markerHeight")), refX = Number(m.getAttribute("refX"));
+    if (!(vb.length === 4 && mw > 0 && mh > 0 && Number.isFinite(refX))) continue;
+    m.setAttribute("markerWidth", String(mw * k));
+    m.setAttribute("markerHeight", String(mh * k));
+    // Keep the tip where Mermaid put it (at the node border): the head grows backwards along the edge.
+    if (/End$/.test(m.id)) m.setAttribute("refX", String(vb[0] + vb[2] - (vb[0] + vb[2] - refX) / k));
+    else m.setAttribute("refX", String(vb[0] + (refX - vb[0]) / k));
+  }
+  const vb = (root.getAttribute("viewBox") || "").split(/[\s,]+/).map(Number);
+  const size = vb.length === 4 && vb[2] > 0 && vb[3] > 0 ? { w: vb[2], h: vb[3] } : null;
+  return { svg: new XMLSerializer().serializeToString(root), size };
+}
 const svgUrl = (svg) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 function decodeThen(url, live, set) {
   const img = new Image();
@@ -624,17 +725,18 @@ function decodeThen(url, live, set) {
 function Artifact({ item }) {
   const [src, setSrc] = React.useState("");
   const [error, setError] = React.useState("");
+  const [natural, setNatural] = React.useState(null);
   React.useEffect(() => {
     let alive = true;
     const live = () => alive;
     // Keep showing the previous image until the replacement is ready (no flicker);
     // clear it only if the replacement fails.
     const fail = (e) => { if (alive) { setSrc(""); setError(String(e?.message || e).replace(/\s+/g, " ").trim().slice(0, 300)); } };
-    const ok = (url) => { setError(""); setSrc(url); };
+    const ok = (url, size = null) => { setError(""); setNatural(size); setSrc(url); };
     if (item.type === "svg") track(decodeThen(svgUrl(item.source), live, ok).catch(fail));
     if (item.type === "icon") track(decodeThen(`/icons/${encodeURIComponent(item.icon)}.svg`, live, ok).catch(() => fail(`icon "${item.icon}" could not be loaded`)));
     if (item.type === "molecule") track(renderMolecule(item.smiles, Math.round(item.width), Math.round(item.height)).then((svg) => decodeThen(svgUrl(svg), live, ok)).catch(fail));
-    if (item.type === "mermaid") track(mermaid.render(`diagram-${item.id.replace(/[^a-zA-Z0-9_-]/g, "")}`, item.source).then(({ svg }) => decodeThen(svgUrl(svg), live, ok)).catch((e) => fail(`Mermaid: ${e?.message || e}`)));
+    if (item.type === "mermaid") track(mermaid.render(`diagram-${item.id.replace(/[^a-zA-Z0-9_-]/g, "")}`, item.source).then(({ svg }) => { const t = tuneMermaid(svg); return decodeThen(svgUrl(t.svg), live, (url) => ok(url, t.size)); }).catch((e) => fail(`Mermaid: ${e?.message || e}`)));
     return () => { alive = false; };
   }, [item.id, item.type, item.source, item.smiles, item.icon, item.width, item.height]);
   if (item.type === "plot") return <Plot item={item} />;
@@ -644,7 +746,7 @@ function Artifact({ item }) {
     <text x={item.x + 12} y={item.y + 50} fill="#ef6f6c" fontSize="12" style={{ fontFamily: FONTS.mono }}>{error.length > (item.width - 24) / 7.3 ? error.slice(0, Math.max(10, Math.floor((item.width - 24) / 7.3) - 1)) + "…" : error}</text>
   </g>;
   if (!src) return null;
-  const img = <image href={src} x={item.x} y={item.y} width={item.width} height={item.height} preserveAspectRatio="xMidYMid meet" opacity={item.opacity} aria-label={item.label || item.type} />;
+  const img = <image href={src} x={item.x} y={item.y} width={item.width} height={item.height} preserveAspectRatio="xMidYMid meet" opacity={item.opacity} aria-label={item.label || item.type} data-natural-w={natural?.w} data-natural-h={natural?.h} />;
   // card: a soft light panel behind illustrations drawn for white paper.
   return item.card ? <g><rect x={item.x - 8} y={item.y - 8} width={item.width + 16} height={item.height + 16} rx="14" fill="#efe9dc" opacity="0.94" />{img}</g> : img;
 }
@@ -662,8 +764,10 @@ function drawList(board) {
 function ChapterFrame({ c }) {
   if (c.frame === false) return null;
   return <g className="chapter-frame" data-chapter-frame={c.id}>
-    <rect x={c.x} y={c.y} width={c.w} height={c.h} rx="18" fill="none" stroke="#ffffff1c" strokeWidth="2" />
-    {c.title ? <text x={c.x + 6} y={c.y - 16} fill="#8a8578" fontSize="22" style={{ fontFamily: FONTS.serif, fontStyle: "italic" }}>{c.title}</text> : null}
+    {/* The frame keeps a constant on-screen weight, and the title (style.css) a minimum on-screen
+        size, so a zoomed-out overview still shows where each chapter is and what it is called. */}
+    <rect x={c.x} y={c.y} width={c.w} height={c.h} rx="18" fill="none" stroke="#ffffff1c" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+    {c.title ? <text className="chapter-title" x={c.x + 6} y={c.y - 16} fill="#8a8578" fontSize="22" style={{ fontFamily: FONTS.serif, fontStyle: "italic" }}>{c.title}</text> : null}
   </g>;
 }
 function Board({ board, revision }) {
@@ -704,6 +808,17 @@ window.__boardLint = (home = { x: 0, y: 0, w: BOARD.w, h: BOARD.h }) => {
   const issues = [];
   for (const el of svg.querySelectorAll("[data-render-error]"))
     issues.push(`artifact ${el.closest("g[data-id]")?.dataset.id} FAILED TO RENDER: ${el.dataset.renderError}`);
+  // A Mermaid diagram is scaled to fit its box: a long chain in a small box shrinks its text
+  // below reading size, which no overlap check can see.
+  for (const im of svg.querySelectorAll(":scope > g[data-kind=artifact] image[data-natural-w]")) {
+    const nw = Number(im.dataset.naturalW), nh = Number(im.dataset.naturalH);
+    const w = im.width.baseVal.value, h = im.height.baseVal.value, k = Math.min(w / nw, h / nh);
+    if (!(k > 0) || MERMAID_FONT_PX * k >= MIN_TEXT_PX) continue;
+    // Smallest box (same aspect as the diagram) that keeps the text readable.
+    const need = (v) => Math.ceil((v * MIN_TEXT_PX) / MERMAID_FONT_PX / 10) * 10;
+    issues.push(`mermaid ${im.closest("g[data-id]")?.dataset.id}: text renders at about ${Math.round(MERMAID_FONT_PX * k)} px (diagram shrunk to ${Math.round(k * 100)}% to fit ${Math.round(w)}x${Math.round(h)}); ` +
+      `it needs at least ${need(nw)}x${need(nh)}: enlarge it, use fewer nodes per row (e.g. graph TD instead of LR) or shorten the labels`);
+  }
   for (const it of items) {
     // Items in a chapter must stay inside it; free items inside the home board.
     const c = it.chapter && chapters.get(it.chapter);
@@ -864,6 +979,7 @@ function render(data) {
   // Commit synchronously so new steps can be hidden before the browser paints.
   flushSync(() => root.render(<Board board={data.board} revision={data.revision} />));
   syncCamera(data.board, first);
+  updateViewScale();
   onRendered(data.board, first);
   scheduleRef();
 }
