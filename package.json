@@ -1,0 +1,56 @@
+{
+  "name": "pi-math-board",
+  "version": "0.2.0",
+  "description": "Pi companion blackboard: a view-only browser board the model draws on \u2014 KaTeX equations, chemistry, plots, molecules, science illustrations, SVG and Mermaid diagrams, chapters with camera moves, step-by-step animation, snapshots and autosave.",
+  "keywords": [
+    "pi-package"
+  ],
+  "type": "module",
+  "dependencies": {
+    "@excalidraw/excalidraw": "0.18.1",
+    "katex": "0.19.1",
+    "mermaid": "11.17.2",
+    "playwright-core": "1.64.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "smiles-drawer": "2.4.1"
+  },
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:browser": "playwright test",
+    "test:load": "node scripts/verify-import.mjs && node scripts/verify-reload.mjs",
+    "build:icons": "node scripts/build-icons.mjs"
+  },
+  "overrides": {
+    "nanoid": "3.3.18",
+    "lodash-es": "4.18.1",
+    "katex": "$katex"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "esbuild": "0.28.2"
+  }
+}
