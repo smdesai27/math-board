@@ -42,7 +42,7 @@ async function imageSvg(page, id) {
   return decodeURIComponent(href.replace(/^data:image\/svg\+xml;charset=utf-8,/, ""));
 }
 
-test("the three demo lessons render completely with no layout warnings", async ({ page }) => {
+test("the demo lessons render completely with no layout warnings", async ({ page }) => {
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await open(page);

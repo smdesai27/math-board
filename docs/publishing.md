@@ -13,8 +13,8 @@ Checked against the registry docs on 2026-10-27: the [publishing quickstart](htt
 
 1. **(interactive)** Make the repository public: GitHub, Settings, General, Danger Zone, Change visibility. The registry entry, the npm page and the README's relative links all point at it.
 2. Add the README screenshot at `docs/images/board.png`. Optionally add a gallery preview: pi reads `pi.image` and `pi.video` from `package.json` (not set yet).
-4. **(interactive)** An npm account with two-factor authentication, and a GitHub login as `smdesai27` (the `io.github.smdesai27/` namespace comes from that login).
-5. Install the registry's publisher CLI:
+3. **(interactive)** An npm account with two-factor authentication, and a GitHub login as `smdesai27` (the `io.github.smdesai27/` namespace comes from that login).
+4. Install the registry's publisher CLI:
 
    ```sh
    brew install mcp-publisher

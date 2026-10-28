@@ -1,5 +1,5 @@
 /**
- * Three realistic lessons, written the way the tutor builds them: one board_update per lesson
+ * Five realistic lessons, written the way the tutor builds them: one board_update per lesson
  * step (baseRevision is filled in by the caller), chapters, camera moves and short ids.
  * Used by scripts/demo-lessons.mjs (renders them through the real tools) and by the tests
  * (layout warnings and DOM checks), so keep the coordinates sensible rather than perfect.
@@ -201,4 +201,119 @@ export const CHEM = {
   ],
 };
 
-export const LESSONS = [PHYSICS, MRI, CHEM];
+/* ---------- 4. computer science: binary search and a state machine ---------- */
+export const CS = {
+  slug: "cs",
+  title: "Searching and state machines",
+  steps: [
+    {
+      title: "Searching and state machines",
+      chapters: [{ op: "add", id: "search", title: "Binary search" }],
+      scene: { mode: "append", artifacts: [{
+        type: "mermaid", id: "bs", x: 40, y: 60, width: 520, height: 700, chapter: "search", label: "binary search",
+        source: "flowchart TD\n  S([\"lo = 0, hi = n − 1\"]) --> C{\"lo ≤ hi?\"}\n  C -->|no| N([\"not found\"])\n  C -->|yes| M[\"mid = ⌊(lo + hi) / 2⌋\"]\n  M --> Q{\"a[mid] vs target\"}\n  Q -->|equal| F([\"found at mid\"])\n  Q -->|smaller| L[\"lo = mid + 1\"]\n  Q -->|larger| H[\"hi = mid − 1\"]\n  L --> C\n  H --> C",
+      }] },
+      camera: { chapter: "search" },
+    },
+    {
+      scene: { mode: "append", shapes: [
+        { type: "text", id: "t1", text: "each pass halves the range", x: 620, y: 110, size: 28, chapter: "search" },
+        { type: "text", id: "t2", text: "n → n/2 → n/4 → … → 1: about log₂ n passes", x: 620, y: 150, size: 22, color: MUTED, chapter: "search" },
+      ] },
+    },
+    {
+      scene: { mode: "append", artifacts: [{
+        type: "plot", id: "p1", x: 620, y: 200, width: 540, height: 420, xRange: [1, 16], yRange: [0, 260], chapter: "search",
+        functions: [{ expr: "x^2", label: "n²", color: RED }, { expr: "x*log2(x)", label: "n log₂ n", color: GREEN }],
+        xLabel: "n", yLabel: "comparisons", title: "n lookups in a sorted list of n",
+      }], shapes: [
+        { type: "text", id: "t3", text: "linear search each time: n²\nbinary search each time: n log₂ n", x: 620, y: 680, size: 22, color: MUTED, chapter: "search" },
+      ] },
+    },
+    {
+      chapters: [{ op: "add", id: "states", title: "A connection as a state machine" }],
+      scene: { mode: "append", artifacts: [{
+        type: "mermaid", id: "tcp", x: 40, y: 40, width: 600, height: 720, chapter: "states", label: "TCP-like connection",
+        source: "stateDiagram-v2\n  [*] --> Closed\n  Closed --> SynSent : connect / send SYN\n  Closed --> Listen : listen\n  Listen --> SynRcvd : SYN / send SYN+ACK\n  SynSent --> Established : SYN+ACK / send ACK\n  SynRcvd --> Established : ACK\n  Established --> FinWait : close / send FIN\n  FinWait --> Closed : ACK",
+      }] },
+      camera: { chapter: "states" },
+    },
+    {
+      scene: { mode: "append", shapes: [
+        { type: "text", id: "t4", text: "each edge: event / action", x: 690, y: 140, size: 28, chapter: "states" },
+        { type: "text", id: "t5", text: "client: connect, send SYN,\nwait for SYN+ACK", x: 690, y: 230, size: 22, color: BLUE, chapter: "states" },
+        { type: "text", id: "t6", text: "server: listen, answer a SYN\nwith SYN+ACK, wait for ACK", x: 690, y: 340, size: 22, color: YELLOW, chapter: "states" },
+        { type: "text", id: "t7", text: "data moves only in Established", x: 690, y: 460, size: 22, color: MUTED, chapter: "states" },
+      ] },
+    },
+  ],
+};
+
+/* ---------- 5. history: the printing press ---------- */
+export const HISTORY = {
+  slug: "history",
+  title: "From the printing press to the web",
+  steps: [
+    {
+      title: "From the printing press to the web",
+      chapters: [{ op: "add", id: "timeline", title: "Copying an idea gets cheaper" }],
+      scene: { mode: "append", artifacts: [{
+        type: "mermaid", id: "tl", x: 40, y: 110, width: 1120, height: 460, chapter: "timeline", label: "timeline",
+        source: "timeline\n  1450 : Printing press : movable metal type\n  1837 : Telegraph : text over wires\n  1920 : Broadcast radio : one voice, many listeners\n  1991 : World Wide Web : anyone can publish",
+      }], shapes: [{ type: "text", id: "h1", text: "Four ways to reach readers", x: 60, y: 90, size: 34, chapter: "timeline" }] },
+      camera: { chapter: "timeline" },
+    },
+    {
+      scene: { mode: "append", shapes: [
+        { type: "text", id: "t1", text: "each step cut the cost of reaching one more reader", x: 60, y: 640, size: 28, chapter: "timeline" },
+        { type: "text", id: "t2", text: "the question to follow: who gets to publish?", x: 60, y: 700, size: 22, color: YELLOW, chapter: "timeline" },
+      ] },
+    },
+    {
+      chapters: [{ op: "add", id: "press", title: "The press: causes and effects" }],
+      scene: { mode: "append", artifacts: [{
+        type: "mermaid", id: "mm", x: 40, y: 60, width: 1120, height: 700, chapter: "press", label: "causes and effects",
+        source: "mindmap\n  Printing press\n    Causes\n      Cheap paper\n      Metalworking skill\n      Demand for books\n    Effects\n      Reformation pamphlets\n      Standard spelling\n      Scientific journals",
+      }] },
+      camera: { chapter: "press" },
+    },
+    {
+      chapters: [{ op: "add", id: "argument", title: "Did the press cause the Reformation?" }],
+      scene: { mode: "append", shapes: [
+        { type: "rect", id: "bc", x: 330, y: 70, w: 540, h: 100, chapter: "argument" },
+        { type: "text", id: "claim", text: "The press made the Reformation possible", x: 600, y: 130, size: 26, anchor: "middle", chapter: "argument" },
+      ] },
+      camera: { chapter: "argument" },
+    },
+    {
+      scene: { mode: "append", shapes: [
+        { type: "rect", id: "b1", x: 40, y: 300, w: 340, h: 120, color: GREEN, chapter: "argument" },
+        { type: "text", id: "s1", text: "Printed copies of Luther's\ntheses spread across\nGermany in weeks", x: 210, y: 340, size: 21, anchor: "middle", chapter: "argument" },
+        { type: "rect", id: "b2", x: 430, y: 300, w: 340, h: 120, color: GREEN, chapter: "argument" },
+        { type: "text", id: "s2", text: "A printed German Bible\nlet readers check\nthe Church's claims", x: 600, y: 340, size: 21, anchor: "middle", chapter: "argument" },
+        { type: "arrow", id: "a1", points: [[210, 300], [440, 172]], color: GREEN, width: 2.5, chapter: "argument" },
+        { type: "arrow", id: "a2", points: [[600, 300], [600, 172]], color: GREEN, width: 2.5, chapter: "argument" },
+        { type: "text", id: "l1", text: "supports", x: 250, y: 230, size: 20, italic: true, color: GREEN, chapter: "argument" },
+      ] },
+    },
+    {
+      scene: { mode: "append", shapes: [
+        { type: "rect", id: "b3", x: 820, y: 300, w: 340, h: 120, color: RED, chapter: "argument" },
+        { type: "text", id: "o1", text: "Wycliffe and Hus said much\nthe same a century earlier,\nbefore print", x: 990, y: 340, size: 21, anchor: "middle", chapter: "argument" },
+        { type: "arrow", id: "a3", points: [[990, 300], [760, 172]], color: RED, width: 2.5, chapter: "argument" },
+        { type: "text", id: "l3", text: "objects", x: 900, y: 230, size: 20, italic: true, color: RED, chapter: "argument" },
+      ] },
+    },
+    {
+      scene: { mode: "append", shapes: [
+        { type: "rect", id: "b4", x: 820, y: 560, w: 340, h: 120, color: YELLOW, chapter: "argument" },
+        { type: "text", id: "r1", text: "but without print, their\nideas stayed in England\nand Bohemia", x: 990, y: 600, size: 21, anchor: "middle", chapter: "argument" },
+        { type: "arrow", id: "a4", points: [[990, 560], [990, 422]], color: YELLOW, width: 2.5, chapter: "argument" },
+        { type: "text", id: "l4", text: "answers", x: 1005, y: 500, size: 20, italic: true, color: YELLOW, chapter: "argument" },
+        { type: "text", id: "t3", text: "claim on top, reasons below,\narrows say how each one bears on it", x: 60, y: 620, size: 22, color: MUTED, chapter: "argument" },
+      ] },
+    },
+  ],
+};
+
+export const LESSONS = [PHYSICS, MRI, CHEM, CS, HISTORY];

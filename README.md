@@ -91,6 +91,31 @@ For a checkout, use `"command": "node"` and `"args": ["/absolute/path/to/math-bo
 - **Diagrams**: hand-written SVG (markers, gradients, symbols, CSS, SMIL animation) and Mermaid (flowcharts, sequence, class, state, ER, gantt, mind maps, graphs; automatic layout).
 - **Marks**: lines, arrows, curves, rectangles, ellipses and text (a LaTeX-style serif by default).
 
+## Not just math
+
+The name says math, but the board doesn't know what it's teaching. It puts up equations, plots, molecules, illustrations, diagrams and text, and most subjects need some mix of those. What that looks like by subject:
+
+- **Physics and math**: derivations one line per step, function and parametric plots, free-body and vector diagrams in SVG.
+- **Chemistry**: 2D structures from SMILES, reactions and equilibria with `\ce{…}`.
+- **Biology and medicine**: anatomy, organ and cell illustrations from the offline library, pathways and mechanisms as flowcharts.
+- **Computer science**: algorithms as flowcharts, state machines, complexity plots, sequence and class diagrams.
+- **History and the humanities**: timelines, mind maps of causes and effects, argument maps built from boxes and arrows.
+- **Languages**: syntax trees as Mermaid graphs.
+
+Three chapters from the sample lessons (`node scripts/demo-lessons.mjs <out-dir>` renders all five):
+
+![Salicylic acid and aspirin drawn from SMILES with an arrow between them, and the acetylation written below in mhchem](docs/images/chem.png)
+
+*Chemistry: salicylic acid to aspirin, both drawn from SMILES, and the reaction in `\ce{…}`.*
+
+![A Mermaid flowchart of binary search on the left, and on the right a plot of n squared against n log n](docs/images/cs.png)
+
+*Computer science: binary search as a flowchart, and what n lookups cost with and without it.*
+
+![An argument map: the claim that the press made the Reformation possible, two reasons for it, an objection and an answer to the objection, joined by coloured arrows](docs/images/history.png)
+
+*History: an argument map made of rectangles, text and arrows.*
+
 ## How lessons are built
 
 - **Coordinates**: each chapter, and the home board, is a 1200×800 space with the origin top-left. Text `y` is the baseline; equation `x,y` is the top-left of its box; rect, ellipse and artifact `x,y` is the top-left corner.
@@ -182,7 +207,7 @@ npm test                    # unit, HTTP, hardening, validator and snapshotter t
 npm run test:browser        # Playwright browser tests
 npm run test:load           # real pi loader + /reload regression
 node scripts/e2e-snapshot.mjs   # end to end: update, layout check, snapshot, /board export
-node scripts/demo-lessons.mjs <out-dir> [physics|mri|chem]   # visual QA on three sample lessons
+node scripts/demo-lessons.mjs <out-dir> [physics|mri|chem|cs|history]   # visual QA on five sample lessons
 ```
 
 - `test:load`, `e2e-snapshot.mjs` and `demo-lessons.mjs` load the extension through pi's real loader. They use `PI_HOST_ROOT` when it's set (an installed `@earendil-works/pi-coding-agent` package directory), else the pi that `npm ci` put in `node_modules`, else a global install (`npm root -g`).

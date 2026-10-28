@@ -15,7 +15,8 @@ test("every demo lesson step is accepted as given, one lesson step per update", 
   const dataDir = await mkdtemp(path.join(tmpdir(), "board-demo-"));
   try {
     const server = new BoardServer({ dataDir, autosave: false });
-    const expected = { physics: ["fbd", "deriv"], mri: ["signal", "kspace", "fourier"], chem: ["asa", "heart"] };
+    const expected = { physics: ["fbd", "deriv"], mri: ["signal", "kspace", "fourier"], chem: ["asa", "heart"], cs: ["search", "states"], history: ["timeline", "press", "argument"] };
+    assert.deepEqual(LESSONS.map((l) => l.slug), Object.keys(expected));
     for (const lesson of LESSONS) {
       server.update({ baseRevision: server.revision, clear: ["all"] });
       for (const [i, step] of lesson.steps.entries()) {

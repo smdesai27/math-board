@@ -1,10 +1,10 @@
 /**
- * Visual QA: build three realistic lessons through the real tools (Pi's loader, board_update,
+ * Visual QA: build five realistic lessons through the real tools (Pi's loader, board_update,
  * board_library, board_snapshot) and write every chapter, the camera view and the overview as
  * PNGs at the default width and at 1600 px, plus warnings.json with every layout warning the
  * tools returned.
  *
- *   node scripts/demo-lessons.mjs <out-dir> [physics|mri|chem ...]
+ *   node scripts/demo-lessons.mjs <out-dir> [physics|mri|chem|cs|history ...]
  *
  * Needs pi (global install, this checkout's devDependency, or PI_HOST_ROOT) and a headless
  * Chromium, like scripts/e2e-snapshot.mjs. The board's data folder is a fresh temporary folder
@@ -18,7 +18,7 @@ import { ROOT as root, isolateDataDir, piHostRoot } from "./lib/pi-host.mjs";
 
 const [outArg, ...only] = process.argv.slice(2);
 if (!outArg) {
-  console.error("usage: node scripts/demo-lessons.mjs <out-dir> [physics|mri|chem ...]");
+  console.error("usage: node scripts/demo-lessons.mjs <out-dir> [physics|mri|chem|cs|history ...]");
   process.exit(2);
 }
 const out = path.resolve(outArg);

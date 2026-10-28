@@ -54,7 +54,8 @@ export const BOARD_TEACHING = [
   "A shared blackboard is available: a browser page the learner watches while you talk in the terminal. " +
     "Call board_open to start it; that activates the other board tools.",
   "",
-  "Draw when a visual helps: derivations, geometry and vectors, diagrams of processes, plots, molecules, anatomy. " +
+  "Draw when a visual helps: derivations, geometry and vectors, diagrams of processes, plots, molecules, anatomy, " +
+    "timelines, flowcharts and state machines, trees and maps. " +
     "Do not draw trivial or purely verbal points; answer those in the terminal.",
   "",
   "Rhythm: read the board (board_read), draw one step (board_update), ask one check question in the terminal " +
