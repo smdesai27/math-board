@@ -1,0 +1,38 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.smdesai27/math-board",
+  "title": "Math board",
+  "description": "A local, view-only chalkboard the model draws on: equations, plots, molecules and diagrams.",
+  "repository": {
+    "url": "https://github.com/smdesai27/math-board",
+    "source": "github",
+    "id": "1436120036"
+  },
+  "websiteUrl": "https://github.com/smdesai27/math-board#readme",
+  "version": "0.3.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "pi-math-board",
+      "version": "0.3.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "MATH_BOARD_NO_BROWSER",
+          "description": "Set to 1 and board_open only returns the board's URL instead of opening it in the default browser.",
+          "isRequired": false,
+          "format": "string",
+          "placeholder": "1"
+        },
+        {
+          "name": "MATH_BOARD_DATA_DIR",
+          "description": "Folder for this board's autosave and named saves, used as given (PI_MATH_BOARD_DATA_DIR, the old name, also works). Default: the mcp/ subfolder of the board's data folder. A plain checkout keeps lessons in <package>/.data; an npm or npx install uses a per-user folder: ~/Library/Application Support/math-board on macOS, $XDG_STATE_HOME/math-board or ~/.local/state/math-board on Linux, %LOCALAPPDATA%\\math-board on Windows.",
+          "isRequired": false,
+          "format": "filepath"
+        }
+      ]
+    }
+  ]
+}
