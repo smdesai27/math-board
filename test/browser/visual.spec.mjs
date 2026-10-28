@@ -52,7 +52,7 @@ test("the three demo lessons render completely with no layout warnings", async (
     const lint = await page.evaluate(() => window.__boardLint());
     expect(lint.issues, lesson.slug).toEqual([]);
     const artifacts = lesson.steps.flatMap((s) => s.scene?.artifacts ?? []);
-    for (const a of artifacts.filter((a) => a.type !== "plot"))
+    for (const a of artifacts.filter((x) => x.type !== "plot"))
       await expect(page.locator(`#blackboard g[data-id="${a.id}"] image`), `${lesson.slug} ${a.id}`).toHaveCount(1);
     expect(await page.locator("#blackboard [data-render-error]").count()).toBe(0);
   }
@@ -180,4 +180,47 @@ test("chapter titles keep a readable on-screen size in the overview; frames keep
   // At full size the title is the plain 22 px label.
   expect((await title([0, 0, 1200, 800])).boardPx).toBe(22);
   await expect(page.locator("#blackboard .chapter-frame rect").first()).toHaveAttribute("vector-effect", "non-scaling-stroke");
+});
+
+test("plots whose range is about one ULP wide (or clamped to one value) render with bounded ticks instead of hanging", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const tiny = [999999.9999999999, 1e6]; // one ULP apart: the tick step is below half an ULP
+  const plot = (id, x, extra) => ({ type: "plot", id, x, y: 40, width: 360, height: 280, functions: [{ expr: "x" }], parametric: [], areas: [], points: [], vlines: [], hlines: [], ...extra });
+  // Served straight to the page, so the browser's own guard is tested whatever the server accepts.
+  await page.route("**/api/state", async (route) => {
+    const response = await route.fetch();
+    const json = await response.json();
+    json.board.scene.artifacts = [
+      plot("ulp", 40, { xRange: tiny, yRange: tiny }),
+      plot("flat", 420, { xRange: [1e6, 1e6], yRange: [1e6, 1e6] }),
+      plot("normal", 800, { xRange: [-10, 10] }),
+    ];
+    await route.fulfill({ response, json });
+  });
+  await open(page);
+  await expect(page.locator("#blackboard .plot")).toHaveCount(3);
+  const ticks = await page.evaluate(() => Object.fromEntries(["ulp", "flat", "normal"].map((id) => {
+    const g = document.querySelector(`#blackboard g[data-id="${id}"] .plot`);
+    return [id, { grid: g.querySelectorAll("line").length, labels: g.querySelectorAll(".plot-ticks text").length }];
+  })));
+  for (const id of ["ulp", "flat"]) {
+    expect(ticks[id].grid, id).toBeLessThanOrEqual(2 * 201 + 2);
+    expect(ticks[id].labels, id).toBeLessThanOrEqual(2 * 201);
+  }
+  expect(ticks.normal.labels).toBeGreaterThan(4);
+  expect(errors).toEqual([]);
+});
+
+test("equations measure the same in board units at any window size", async ({ page }) => {
+  await open(page);
+  server.update({ equations: [{ op: "add", id: "eq", latex: "\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt\\pi}{2}", label: "Gauss", x: 100, y: 100 }] });
+  await settled(page);
+  const box = () => page.evaluate(() => { window.__setView(0, 0, 1200, 800); return window.__boardLint().items.find((i) => i.id === "eq"); });
+  const wide = await box();
+  for (const size of [{ width: 600, height: 400 }, { width: 2400, height: 1600 }]) {
+    await page.setViewportSize(size);
+    const other = await box();
+    for (const k of ["x", "y", "w", "h"]) expect(Math.abs(other[k] - wide[k]), `${k} at ${size.width} px`).toBeLessThanOrEqual(1);
+  }
 });

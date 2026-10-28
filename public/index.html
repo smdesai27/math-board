@@ -1,13 +1,13 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pi Blackboard</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Blackboard</title>
 <link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/style.css"><script type="module" src="/app.js"></script>
 </head>
 <body>
-<div id="surface" aria-label="Pi mathematics blackboard"></div>
-<header><strong>Pi Blackboard</strong><span id="board-title"></span><span id="conn" role="status">Connecting…</span></header>
-<nav aria-label="Board controls"><span id="nav-hint">scroll/drag pan · ⌘/ctrl+scroll zoom · ←/→ steps · r replay · space play · [ ] chapters · o overview · f follow · click item: copy ref</span><span id="step-indicator"></span><button id="btn-step-back" title="Previous step (←)">◂</button><button id="btn-step-fwd" title="Next step (→)">▸</button><button id="btn-replay" title="Replay this chapter (r)">Replay</button><button id="btn-prev" title="Previous chapter ([)">‹</button><button id="btn-next" title="Next chapter (])">›</button><button id="btn-overview" title="Whole lesson (o)">Overview</button><button id="btn-follow" title="Follow the lesson camera (f, double-click)">Follow</button><button id="btn-clear">Clear</button><button id="btn-save">Save</button></nav>
-<div id="conflict" hidden role="alert"><span id="conflict-message"></span><button id="download-draft">Download draft</button><button id="reload-board">Reload</button></div>
+<div id="surface" aria-label="Blackboard"></div>
+<header><strong>Blackboard</strong><span id="board-title"></span><span id="conn" role="status">Connecting…</span></header>
+<nav aria-label="Board controls"><span id="nav-hint">scroll/drag pan · ⌘/ctrl+scroll zoom · ←/→ steps · r replay · space play · [ ] chapters · o overview · f follow · click item: copy ref</span><span id="step-indicator"></span><button id="btn-step-back" title="Previous step (←)">◂</button><button id="btn-step-fwd" title="Next step (→)">▸</button><button id="btn-replay" title="Replay this chapter (r)">Replay</button><button id="btn-prev" title="Previous chapter ([)">‹</button><button id="btn-next" title="Next chapter (])">›</button><button id="btn-overview" title="Whole lesson (o)">Overview</button><button id="btn-follow" title="Follow the lesson camera (f, double-click)">Follow</button><button id="btn-clear" title="Clear the whole board (asks first)">Clear</button><button id="btn-save" title="Save the board (as &quot;default&quot;)">Save</button></nav>
+<div id="notice" hidden role="alert"><span id="notice-message"></span></div>
 <div id="item-outline" aria-hidden="true"></div><div id="item-ref" aria-hidden="true"></div><div id="toast" role="status" aria-live="polite"></div>
 </body></html>

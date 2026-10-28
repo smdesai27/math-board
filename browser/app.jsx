@@ -5,17 +5,22 @@ import katex from "katex";
 import "katex/contrib/mhchem"; // \ce{...} chemical equations and \pu{...} units
 import mermaid from "mermaid";
 import "katex/dist/katex.min.css";
-import { BoardSync } from "../public/sync.js";
+import { BoardSync, LiveEvents } from "../public/sync.js";
 import { compileExpr } from "../shared/expr.mjs";
 import SmilesDrawer from "smiles-drawer";
 
 const $ = (id) => document.getElementById(id);
 const hash = new URLSearchParams(location.hash.slice(1));
-const token = hash.get("token");
+const sessionToken = hash.get("token");
 const status = (text) => { $("conn").textContent = text; };
 async function request(path, body) {
-  const response = await fetch(path, { headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, method: body === undefined ? "GET" : "POST", body: body === undefined ? undefined : JSON.stringify(body) });
-  return { ...(await response.json()), status: response.status };
+  let response;
+  try {
+    response = await fetch(path, { headers: { Authorization: `Bearer ${sessionToken}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, method: body === undefined ? "GET" : "POST", body: body === undefined ? undefined : JSON.stringify(body) });
+  } catch {
+    throw new Error("Cannot reach the board server");
+  }
+  return { ...(await response.json().catch(() => ({ ok: false, error: `HTTP ${response.status}` }))), status: response.status };
 }
 
 /* ---------- render readiness (used by headless snapshots) ---------- */
@@ -28,7 +33,7 @@ function track(promise) {
 }
 
 /* ---------- view (board-space window shown in the browser) ---------- */
-export const BOARD = { w: 1200, h: 800 };
+const BOARD = { w: 1200, h: 800 };
 function parseView(v) {
   const n = String(v || "").split(",").map(Number);
   return n.length === 4 && n.every(Number.isFinite) && n[2] > 0 && n[3] > 0 ? n : [0, 0, BOARD.w, BOARD.h];
@@ -137,7 +142,6 @@ let shown = 0; // highest step currently visible (or being revealed)
 let playToken = { cancelled: true };
 let playing = false; // true only while playSteps is actually running
 const running = new Set(); // finish() callbacks of in-flight reveals
-const shownStep = () => shown;
 const itemGroups = () => [...($("blackboard")?.querySelectorAll(":scope > g[data-id]") ?? [])];
 const stepOf = (g) => Number(g.dataset.step || 0);
 const RANK = { artifact: 0, mark: 1, text: 2, equation: 3 };
@@ -180,15 +184,15 @@ function defaultReveal(g) {
   if (g.dataset.kind === "mark") return g.querySelector("[stroke-dasharray]") ? "wipe" : "draw";
   return "write";
 }
-function revealDuration(g, mode) {
+function revealDuration(g, how) {
   if (g.dataset.duration) return Number(g.dataset.duration);
   const bb = g.getBBox();
-  if (mode === "draw") {
+  if (how === "draw") {
     const len = [...g.querySelectorAll(GEOM)].reduce((n, el) => n + (el.getTotalLength?.() || 0), 0);
     return Math.max(300, Math.min(1600, len * 0.9));
   }
-  if (mode === "write" || mode === "wipe") return Math.max(300, Math.min(1400, bb.width * 1.3));
-  if (mode === "fade") return 450;
+  if (how === "write" || how === "wipe") return Math.max(300, Math.min(1400, bb.width * 1.3));
+  if (how === "fade") return 450;
   return 0;
 }
 let clipSeq = 0;
@@ -338,7 +342,7 @@ function onRendered(board, first) {
   updateStepUI();
 }
 
-/* ---------- pan & zoom (viewer navigation; the board stays view-only) ---------- */
+/* ---------- pan & zoom (viewer navigation only: panning and zooming never change the board) ---------- */
 // Scroll/two-finger swipe pans, ctrl/cmd+scroll or pinch zooms at the cursor,
 // drag pans; [ ] or PageUp/PageDown change chapter; o = overview; f or 0 = follow the lesson.
 function viewScale() {
@@ -459,31 +463,47 @@ function drawShape(s) {
   }
   return null;
 }
-function nativeShape(e) {
-  if (e.isDeleted) return null;
-  const color = e.strokeColor === "#1e1e1e" ? "#e8e3d9" : e.strokeColor || "#e8e3d9";
-  if (e.type === "text") return { type: "text", id: e.id, x: e.x, y: e.y + (e.fontSize || 20), text: e.text, size: e.fontSize, color };
-  if (["line", "arrow", "freedraw"].includes(e.type)) return { type: e.type === "arrow" ? "arrow" : "line", id: e.id, points: (e.points || []).map(([x, y]) => [e.x + x, e.y + y]), color, width: e.strokeWidth };
-  if (e.type === "rectangle") return { type: "rect", id: e.id, x: e.x, y: e.y, w: e.width, h: e.height, color };
-  if (e.type === "ellipse") return { type: "ellipse", id: e.id, x: e.x, y: e.y, w: e.width, h: e.height, color };
-  return null;
-}
 
 /* ---------- equations ---------- */
-export const eqPos = (eq, index) => [Number.isFinite(eq.x) ? eq.x : 88, Number.isFinite(eq.y) ? eq.y : 92 + index * 115];
-function Formula({ eq, index }) {
-  const [x, y] = eqPos(eq, index);
+// The server stores every equation's x,y. An equation that arrives without them (a save written
+// before that) is stacked in its own chapter, so it never moves when another chapter changes.
+const EQ_STACK = { x: 88, y: 92, gap: 115 };
+// KaTeX runs with fixed options (colour and size are CSS on the wrapper, outside KaTeX), so the
+// LaTeX source alone keys the cache. Typesetting is the expensive part of a render: each formula
+// is typeset once per source and copied after that, and never on a re-render that keeps its source.
+const KATEX_OPTIONS = { displayMode: true, throwOnError: false, trust: false, strict: "error", maxExpand: 200, maxSize: 20 };
+const MATH_CACHE_MAX = 1500; // the board holds at most 1000 equations
+const mathCache = new Map(); // latex -> typeset template element (least recently used first)
+function typeset(el, latex) {
+  let tpl = mathCache.get(latex);
+  if (tpl) mathCache.delete(latex);
+  else {
+    tpl = document.createElement("div");
+    try { katex.render(latex, tpl, { ...KATEX_OPTIONS, macros: Object.create(null) }); } catch { tpl.textContent = latex; }
+    if (mathCache.size >= MATH_CACHE_MAX) mathCache.delete(mathCache.keys().next().value);
+  }
+  mathCache.set(latex, tpl);
+  el.replaceChildren(...tpl.cloneNode(true).childNodes);
+}
+function MathBlock({ latex }) {
+  const ref = React.useRef(null);
+  // React renders no children here, so the typeset nodes stay in place across re-renders.
+  React.useLayoutEffect(() => { if (ref.current) typeset(ref.current, latex); }, [latex]);
+  return <div className="eq-math" ref={ref} />;
+}
+function Formula({ eq, x, y }) {
   // Generous box with visible overflow: long or tall formulas must not be clipped.
   const style = { color: eq.color || undefined, fontSize: eq.size ? `${eq.size}em` : undefined };
   return <foreignObject x={x} y={y} width={Math.max(400, BOARD.w - x)} height="400" style={{ overflow: "visible", pointerEvents: "none" }}>
     <div xmlns="http://www.w3.org/1999/xhtml" className="formula" style={style}>
       {eq.label ? <div className="eq-label">{eq.label}</div> : null}
-      <div className="eq-math" ref={(el) => { if (!el) return; try { katex.render(eq.latex, el, { displayMode: true, throwOnError: false, trust: false, strict: "error", maxExpand: 200, maxSize: 20, macros: Object.create(null) }); } catch { el.textContent = eq.latex; } }} />
+      <MathBlock latex={eq.latex} />
     </div>
   </foreignObject>;
 }
-
-
+// Every revision brings a fresh copy of the board. An item whose content did not change is not
+// re-rendered: no re-typesetting and no re-sampling of plots.
+const MemoFormula = React.memo(Formula, (a, b) => a.sig === b.sig && a.x === b.x && a.y === b.y);
 
 /* ---------- molecules (SMILES → 2D structure, offline) ---------- */
 const CHALK_THEME = { FOREGROUND: "#e8e3d9", BACKGROUND: "transparent", C: "#e8e3d9", O: "#ef6f6c", N: "#5fb3d9", F: "#8de0be", CL: "#8de0be", BR: "#f2a65a", I: "#c39bd3", P: "#f2a65a", S: "#f2c14e", B: "#f2a65a", SI: "#f2a65a", H: "#b9b4a8" };
@@ -529,12 +549,28 @@ function renderMolecule(smiles, width, height) {
 const PLOT_COLORS = ["#5fb3d9", "#f2c14e", "#ef6f6c", "#8de0be", "#c39bd3", "#e8e3d9"];
 // Plot chrome on black: axes stay quiet but clearly visible, tick and axis labels brighter
 // than the axes (readable at 1200 px), grid barely there.
-export const PLOT_INK = { axis: "#9b968a", tick: "#b9b4a6", label: "#cfcab9", grid: "#ffffff16" };
+const PLOT_INK = { axis: "#9b968a", tick: "#b9b4a6", label: "#cfcab9", grid: "#ffffff16" };
 // Black outline painted under label text: lines crossing a label stop short of the glyphs.
 const HALO = { stroke: "#000", strokeWidth: 4, strokeLinejoin: "round", paintOrder: "stroke" };
 function niceStep(span, target = 8) {
   const raw = span / target, mag = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / mag;
   return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * mag;
+}
+const MAX_TICKS = 200;
+/**
+ * Multiples of `step` from lo to hi. Each tick is computed from its index, never by adding the
+ * step up, and the count is capped: a range far narrower than its endpoints (a step under half an
+ * ULP) or a zero or non-finite step would otherwise loop forever.
+ */
+function tickValues(lo, hi, step) {
+  if (!(Number.isFinite(lo) && Number.isFinite(hi) && Number.isFinite(step) && step > 0 && hi >= lo)) return [];
+  const first = Math.ceil(lo / step) * step, n = Math.floor((hi + 1e-9 - first) / step);
+  const out = [];
+  for (let i = 0; i <= Math.min(n, MAX_TICKS); i++) {
+    const v = first + i * step;
+    if (v !== out[out.length - 1]) out.push(v);
+  }
+  return out;
 }
 function fmtTick(v, step) {
   const d = Math.max(0, -Math.floor(Math.log10(step) + 1e-9));
@@ -570,7 +606,8 @@ function Plot({ item }) {
   // The y-axis label sits above the plot area (a row of its own), so it never lands on the
   // curve's maximum or a point label at the top of the axis.
   const padL = 46, padR = 18, padT = (item.title ? 34 : 14) + (item.yLabel ? 24 : 0), padB = 34;
-  const [x0, x1] = item.xRange || [-10, 10];
+  let [x0, x1] = item.xRange || [-10, 10];
+  if (!(x1 > x0)) { x0 -= 1; x1 += 1; } // a range whose ends were clamped to the same value
   let [y0, y1] = item.yRange || [NaN, NaN];
   if (!Number.isFinite(y0)) {
     // Auto y-range from samples (robust to asymptotes via percentiles).
@@ -583,8 +620,8 @@ function Plot({ item }) {
     const lo = ys.length ? ys[Math.floor(ys.length * 0.02)] : -1, hi = ys.length ? ys[Math.ceil(ys.length * 0.98) - 1] : 1;
     const pad = (hi - lo || 2) * 0.12;
     y0 = lo - pad; y1 = hi + pad;
-    if (y0 === y1) { y0 -= 1; y1 += 1; }
   }
+  if (!(y1 > y0)) { y0 -= 1; y1 += 1; }
   let iw = W - padL - padR, ih = H - padT - padB, ox = padL, oy = padT;
   if (item.equalAspect) {
     const k = Math.min(iw / (x1 - x0), ih / (y1 - y0));
@@ -596,9 +633,7 @@ function Plot({ item }) {
   const left = item.x + ox, top = item.y + oy, right = left + iw, bottom = top + ih;
   const clipId = `plotclip-${item.id.replace(/[^A-Za-z0-9_-]/g, "")}`;
   const xs = niceStep(x1 - x0, Math.max(3, Math.round(iw / 90))), ysStep = niceStep(y1 - y0, Math.max(3, Math.round(ih / 60)));
-  const xticks = [], yticks = [];
-  for (let v = Math.ceil(x0 / xs) * xs; v <= x1 + 1e-9; v += xs) xticks.push(v);
-  for (let v = Math.ceil(y0 / ysStep) * ysStep; v <= y1 + 1e-9; v += ysStep) yticks.push(v);
+  const xticks = tickValues(x0, x1, xs), yticks = tickValues(y0, y1, ysStep);
   const axX = Math.min(Math.max(0, y0), y1), axY = Math.min(Math.max(0, x0), x1); // axes through 0 when visible
   const font = { fontFamily: FONTS.serif };
   const labels = [];
@@ -658,7 +693,7 @@ function Plot({ item }) {
 // board (a system font, so the text measured here is the text drawn inside the image), near-black
 // nodes with chalk outlines, chalk edges, and opaque black edge-label backgrounds so an edge never
 // strikes through its label.
-export const MERMAID_FONT_PX = 18;
+const MERMAID_FONT_PX = 18;
 const MIN_TEXT_PX = 12; // board px; smaller diagram text is reported by the layout check
 const MERMAID_THEME = {
   darkMode: true, background: "#000000", fontFamily: IMAGE_SERIF, fontSize: `${MERMAID_FONT_PX}px`,
@@ -751,14 +786,25 @@ function Artifact({ item }) {
   return item.card ? <g><rect x={item.x - 8} y={item.y - 8} width={item.width + 16} height={item.height + 16} rx="14" fill="#efe9dc" opacity="0.94" />{img}</g> : img;
 }
 
+const MemoArtifact = React.memo(Artifact, (a, b) => a.sig === b.sig);
+
 /* ---------- board ---------- */
 // One draw list for every item kind, ordered by z (stable within equal z).
 function drawList(board) {
   const list = [];
   for (const s of board.scene.shapes || []) list.push({ id: s.id, kind: s.type === "text" ? "text" : "mark", z: s.z ?? 0, chapter: s.chapter, anim: s, el: drawShape(s) });
-  for (const e of board.scene.elements || []) { const s = nativeShape(e); if (s) list.push({ id: s.id, kind: s.type === "text" ? "text" : "mark", z: 0, el: drawShape(s) }); }
-  for (const a of board.scene.artifacts || []) list.push({ id: a.id, kind: "artifact", z: a.z ?? 0, chapter: a.chapter, anim: a, el: <Artifact item={a} /> });
-  board.equations.forEach((eq, i) => list.push({ id: eq.id, kind: "equation", z: eq.z ?? 0, chapter: eq.chapter, anim: eq, el: <Formula eq={eq} index={i} /> }));
+  for (const a of board.scene.artifacts || []) list.push({ id: a.id, kind: "artifact", z: a.z ?? 0, chapter: a.chapter, anim: a, el: <MemoArtifact item={a} sig={JSON.stringify(a)} /> });
+  const stacked = new Map(); // chapter -> equations placed by the fallback stack so far
+  for (const eq of board.equations) {
+    let { x, y } = eq;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      const k = stacked.get(eq.chapter ?? "") ?? 0;
+      stacked.set(eq.chapter ?? "", k + 1);
+      if (!Number.isFinite(x)) x = EQ_STACK.x;
+      if (!Number.isFinite(y)) y = EQ_STACK.y + k * EQ_STACK.gap;
+    }
+    list.push({ id: eq.id, kind: "equation", z: eq.z ?? 0, chapter: eq.chapter, anim: eq, el: <MemoFormula eq={eq} x={x} y={y} sig={JSON.stringify(eq)} /> });
+  }
   return list.map((d, i) => ({ ...d, i })).sort((a, b) => a.z - b.z || a.i - b.i);
 }
 function ChapterFrame({ c }) {
@@ -792,7 +838,6 @@ function boardRect(svg, el) {
   const p1 = new DOMPoint(r.left, r.top).matrixTransform(inv), p2 = new DOMPoint(r.right, r.bottom).matrixTransform(inv);
   return { x: p1.x, y: p1.y, w: p2.x - p1.x, h: p2.y - p1.y };
 }
-function union(a, b) { if (!a) return b; if (!b) return a; const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y); return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y }; }
 function overlapArea(a, b) { const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x), h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y); return w > 0 && h > 0 ? w * h : 0; }
 window.__boardLint = (home = { x: 0, y: 0, w: BOARD.w, h: BOARD.h }) => {
   const chapters = new Map(chaptersOf(lastData?.board).map((c) => [c.id, c]));
@@ -842,7 +887,7 @@ window.__boardLint = (home = { x: 0, y: 0, w: BOARD.w, h: BOARD.h }) => {
 };
 
 /* ---------- item references (hover label, click to copy) ---------- */
-// The learner is view-only and talks to Pi in the terminal, so every item has a
+// The learner cannot draw on the page and talks to the tutor in the terminal, so every item has a
 // reference they can type: resting the pointer on an item shows a quiet
 // "step 4 · eq2 · ch1" label next to it, and a click (not a drag) copies
 // "step 4, eq2 (chapter ch1)". Nothing is sent to the server and the board is
@@ -943,7 +988,7 @@ function refClick(e) {
   copyTimer = setTimeout(() => { copyTimer = 0; copyRef(text); }, COPY_DELAY);
 }
 async function copyText(text) {
-  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through */ }
   // No async clipboard (or it was refused): copy from a hidden, read-only textarea.
   const ta = document.createElement("textarea"), prev = document.activeElement;
   ta.value = text;
@@ -952,7 +997,7 @@ async function copyText(text) {
   ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none";
   document.body.appendChild(ta);
   let ok = false;
-  try { ta.focus({ preventScroll: true }); ta.select(); ok = document.execCommand("copy"); } catch {}
+  try { ta.focus({ preventScroll: true }); ta.select(); ok = document.execCommand("copy"); } catch { /* ok stays false */ }
   ta.remove();
   if (prev && prev !== document.body) prev.focus?.({ preventScroll: true });
   return ok;
@@ -983,8 +1028,30 @@ function render(data) {
   onRendered(data.board, first);
   scheduleRef();
 }
-const sync = new BoardSync({ request, status, render: (data) => render(data), conflict: (message) => { $("conflict-message").textContent = message; $("conflict").hidden = false; } });
+const sync = new BoardSync({ request, status, render: (data) => render(data) });
 const guarded = (fn) => (...args) => Promise.resolve().then(() => fn(...args)).catch((e) => status(e.message));
+/** One quiet banner for what the learner must act on (today: the board server stopped). */
+function notice(text) {
+  $("notice-message").textContent = text || "";
+  $("notice").hidden = !text;
+}
+const nextPaint = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+/**
+ * The page's only writes (Clear, Save) carry the revision on screen. If the board changed before
+ * the write arrived (409), the current board is shown and the learner is asked again.
+ */
+async function confirmedWrite(path, body, { ask, again }) {
+  if (ask && !confirm(ask)) return null;
+  for (;;) {
+    const r = await sync.mutate(path, body);
+    if (r.ok) return r.data;
+    await nextPaint(); // let the changed board show before the question blocks the page
+    if (!confirm(`The board changed in the meantime (it is now at revision ${r.revision}). ${again}`)) {
+      status(`Not done: the board changed · revision ${r.revision}`);
+      return null;
+    }
+  }
+}
 installNavigation();
 $("btn-prev").onclick = () => goChapter(-1);
 $("btn-next").onclick = () => goChapter(1);
@@ -997,16 +1064,45 @@ $("btn-step-back").onclick = () => stepBack();
 $("btn-step-fwd").onclick = () => stepForward();
 $("btn-replay").onclick = () => replayChapter();
 setFollow(follow);
-$("btn-clear").onclick = guarded(() => { if (confirm("Clear the whole board? (Save first if you want to keep it.)")) return sync.mutate("/api/update", { clear: ["all"] }); });
-$("btn-save").onclick = guarded(async () => { await sync.flush(); const r = await request("/api/save", { name: "default" }); if (!r.ok) throw Error(r.error); status(`Saved · revision ${r.saved.revision}`); });
-$("reload-board").onclick = guarded(async () => { await sync.reload(); $("conflict").hidden = !sync.blocked; });
-$("download-draft").onclick = () => { const text = JSON.stringify(sync.board, null, 2), a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type: "application/json" })); a.download = "pi-board-draft.json"; a.click(); URL.revokeObjectURL(a.href); };
+$("btn-clear").onclick = guarded(() => confirmedWrite("/api/update", { clear: ["all"] }, {
+  ask: "Clear the whole board? (Save first if you want to keep it.)",
+  again: "Clear the whole board as it is now?",
+}));
+$("btn-save").onclick = guarded(async () => {
+  const r = await confirmedWrite("/api/save", { name: "default" }, { again: "Save the board as it is now?" });
+  if (r) status(`Saved · revision ${r.saved.revision}`);
+});
+
+/* ---------- connection ---------- */
+const STOPPED_NOTICE = "The board server stopped; reopen it with /board (or board_open).";
+function onConnection(state) {
+  if (state === "connected") {
+    notice("");
+    status(sync.revision >= 0 ? `Connected · revision ${sync.revision}` : "Connected");
+  } else if (state === "reconnecting") status("Connection lost · reconnecting…");
+  else if (state === "stopped") {
+    status("Board server stopped");
+    notice(STOPPED_NOTICE);
+  }
+}
+let live = null;
+function connect() {
+  live?.close();
+  live = new LiveEvents({
+    open: () => new EventSource(`/api/events?token=${encodeURIComponent(sessionToken)}`),
+    onState: onConnection,
+    // The first event after an outage may come from a restarted server: show its board as it is.
+    onEvent: (d, { resync }) => {
+      if (Number.isSafeInteger(d.revision)) (resync ? sync.resync(d.revision) : sync.remote(d.revision)).catch((e) => status(e.message));
+    },
+  }).start();
+}
 async function start() {
-  if (!/^[a-f0-9]{64}$/.test(token || "")) throw Error("Missing session token — use /board open in Pi.");
-  await sync.refresh();
-  const events = new EventSource(`/api/events?token=${encodeURIComponent(token)}`);
-  events.onmessage = (e) => { try { const d = JSON.parse(e.data); if (Number.isSafeInteger(d.revision)) sync.remote(d.revision).catch(() => {}); } catch {} };
-  events.onerror = () => status("Disconnected — reconnecting…");
-  window.addEventListener("pagehide", () => events.close(), { once: true });
+  if (!/^[a-f0-9]{64}$/.test(sessionToken || "")) throw Error("Missing session token: open the board with /board (or board_open).");
+  // If the server is not reachable, the event stream retries and reports it.
+  await sync.refresh().catch((e) => status(e.message));
+  connect();
+  window.addEventListener("pagehide", () => { live?.close(); live = null; });
+  window.addEventListener("pageshow", (e) => { if (e.persisted) { connect(); sync.refresh().catch((err) => status(err.message)); } });
 }
 start().catch((e) => status(e.message));

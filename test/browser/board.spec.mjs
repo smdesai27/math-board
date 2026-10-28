@@ -243,3 +243,150 @@ test("without the async clipboard API a click still copies (textarea fallback)",
   await expect(page.locator("#toast")).toHaveText("Copied: step 1, eq1 (chapter ch1)");
   expect(await page.evaluate(() => window.__readClipboard())).toBe("step 1, eq1 (chapter ch1)");
 });
+
+test("Clear asks again when the tutor drew while the question was open; the view stays live", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await ready(page);
+  server.update({ equations: [{ op: "add", id: "a", latex: "a = 1", x: 100, y: 100 }] });
+  await expect(page.locator("#conn")).toContainText(`revision ${server.revision}`);
+  const dialogs = [];
+  page.on("dialog", async (d) => {
+    dialogs.push(d.message());
+    // The tutor draws while the learner reads the first question.
+    if (dialogs.length === 1) server.update({ equations: [{ op: "add", id: "b", latex: "b = 2", x: 100, y: 300 }] });
+    await d.accept();
+  });
+  await page.hover("nav");
+  await page.click("#btn-clear");
+  await expect.poll(() => dialogs.length).toBe(2);
+  expect(dialogs[0]).toBe("Clear the whole board? (Save first if you want to keep it.)");
+  expect(dialogs[1]).toBe("The board changed in the meantime (it is now at revision 2). Clear the whole board as it is now?");
+  await expect(page.locator("#blackboard .katex")).toHaveCount(0);
+  expect(server.getState().equations).toEqual([]);
+  // Not frozen: the next model update shows.
+  server.update({ equations: [{ op: "add", id: "c", latex: "c = 3", x: 100, y: 100 }] });
+  await expect(page.locator("#blackboard .katex")).toHaveCount(1);
+  await expect(page.locator("#notice")).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test("declining the second Clear question keeps the board, and later updates still show", async ({ page }) => {
+  await ready(page);
+  server.update({ equations: [{ op: "add", id: "a", latex: "a = 1", x: 100, y: 100 }] });
+  await expect(page.locator("#blackboard .katex")).toHaveCount(1);
+  let asked = 0;
+  page.on("dialog", async (d) => {
+    if (++asked === 1) {
+      server.update({ equations: [{ op: "add", id: "b", latex: "b = 2", x: 100, y: 300 }] });
+      await d.accept();
+    } else await d.dismiss();
+  });
+  await page.hover("nav");
+  await page.click("#btn-clear");
+  await expect(page.locator("#conn")).toHaveText(`Not done: the board changed · revision ${server.revision}`);
+  await expect(page.locator("#blackboard .katex")).toHaveCount(2); // the board the learner was asked about
+  expect(server.getState().equations.map((e) => e.id)).toEqual(["a", "b"]);
+  server.update({ title: "Still live" });
+  await expect(page.locator("#board-title")).toHaveText("Still live");
+});
+
+test("Save writes the board the learner sees and says so", async ({ page }) => {
+  await ready(page);
+  server.update({ title: "To keep", equations: [{ op: "add", id: "a", latex: "a = 1", x: 100, y: 100 }] });
+  await expect(page.locator("#board-title")).toHaveText("To keep");
+  await page.hover("nav");
+  await page.click("#btn-save");
+  await expect(page.locator("#conn")).toHaveText(`Saved · revision ${server.revision}`);
+  expect((await server.listSaves()).map((s) => s.name ?? s)).toContain("default");
+});
+
+test("a stopped board server is reported after a sustained outage; the tab reconnects when it comes back", async ({ page }) => {
+  await page.clock.install();
+  await ready(page);
+  // Stop serving (as when pi reloads the extension), then come back on the same port and token.
+  const http = server.server, port = server.port;
+  await new Promise((resolve) => { http.close(resolve); http.closeAllConnections(); });
+  await expect(page.locator("#conn")).toHaveText("Connection lost · reconnecting…");
+  await expect(page.locator("#notice")).toBeHidden();
+  server.update({ title: "Drawn while the tab was away" }); // nobody is watching
+  await page.clock.fastForward(12000);
+  await expect(page.locator("#notice")).toBeVisible();
+  await expect(page.locator("#notice")).toHaveText("The board server stopped; reopen it with /board (or board_open).");
+  await expect(page.locator("#conn")).toHaveText("Board server stopped");
+  await new Promise((resolve) => http.listen(port, "127.0.0.1", resolve));
+  await page.clock.fastForward(6000);
+  await expect(page.locator("#notice")).toBeHidden();
+  await expect(page.locator("#board-title")).toHaveText("Drawn while the tab was away");
+  await expect(page.locator("#conn")).toHaveText(`Connected · revision ${server.revision}`);
+  server.update({ baseRevision: server.revision, title: "And after" });
+  await expect(page.locator("#board-title")).toHaveText("And after");
+});
+
+/** Serve the page a board whose equations are `equations()` (the real server's revision and the rest of its state). */
+async function craftEquations(page, equations) {
+  await page.route("**/api/state", async (route) => {
+    const response = await route.fetch();
+    const json = await response.json();
+    json.board.chapters = [
+      { id: "ch1", title: "One", x: 0, y: 0, w: 1200, h: 800 },
+      { id: "ch2", title: "Two", x: 1400, y: 0, w: 1200, h: 800 },
+    ];
+    json.board.equations = equations();
+    await route.fulfill({ response, json });
+  });
+}
+
+test("equations sit where the state puts them; ones without x,y stack inside their own chapter", async ({ page }) => {
+  let list = [
+    { id: "e1", latex: "a", chapter: "ch1" },
+    { id: "e2", latex: "b", chapter: "ch1" },
+    { id: "e3", latex: "c", chapter: "ch2" },
+    { id: "e4", latex: "d", chapter: "ch2", x: 300, y: 500 },
+  ];
+  await craftEquations(page, () => list);
+  await page.goto(`${server.url}&nofollow=1`);
+  await expect(page.locator("#blackboard .katex")).toHaveCount(4);
+  const at = (id) => page.locator(`#blackboard g[data-id="${id}"] foreignObject`).evaluate((f) => [f.getAttribute("x"), f.getAttribute("y")].map(Number));
+  expect(await at("e1")).toEqual([88, 92]);
+  expect(await at("e2")).toEqual([88, 207]);
+  expect(await at("e3")).toEqual([88, 92]); // top of chapter 2, not third on the board
+  expect(await at("e4")).toEqual([300, 500]);
+  const { issues } = await page.evaluate(() => window.__boardLint());
+  expect(issues.filter((i) => /outside chapter/.test(i))).toEqual([]);
+  // Deleting an equation in chapter 1 does not move chapter 2's.
+  list = list.filter((e) => e.id !== "e1");
+  server.update({ title: "after delete" });
+  await expect(page.locator("#blackboard .katex")).toHaveCount(3);
+  expect(await at("e2")).toEqual([88, 92]);
+  expect(await at("e3")).toEqual([88, 92]);
+  expect(await at("e4")).toEqual([300, 500]);
+});
+
+test("a new revision does not re-typeset unchanged equations", async ({ page }) => {
+  await ready(page);
+  server.update({
+    equations: [
+      { op: "add", id: "keep", latex: "\\int_0^1 x^2\\,dx = \\tfrac13", x: 100, y: 100 },
+      { op: "add", id: "edit", latex: "y = 1", x: 100, y: 300 },
+    ],
+  });
+  await expect(page.locator("#blackboard .katex")).toHaveCount(2);
+  // Tag the typeset nodes (KaTeX replaces them when it runs), then change the board around them.
+  await page.evaluate(() => {
+    for (const id of ["keep", "edit"]) document.querySelector(`#blackboard g[data-id="${id}"] .katex`).dataset.tag = "old";
+  });
+  server.update({
+    baseRevision: server.revision,
+    title: "Changed around them",
+    items: [{ op: "update", id: "edit", latex: "y = 2" }],
+    equations: [{ op: "add", id: "same", latex: "\\int_0^1 x^2\\,dx = \\tfrac13", x: 100, y: 500 }],
+  });
+  await expect(page.locator("#blackboard .katex")).toHaveCount(3);
+  await expect(page.locator('#blackboard g[data-id="edit"] .katex')).toContainText("2");
+  const tags = await page.evaluate(() => ["keep", "edit", "same"].map((id) => document.querySelector(`#blackboard g[data-id="${id}"] [data-tag]`)?.dataset.tag ?? null));
+  expect(tags).toEqual(["old", null, null]); // only the edited equation was typeset again
+  // The same LaTeX typesets to the same markup (served from the cache for "same").
+  const html = await page.evaluate(() => ["keep", "same"].map((id) => document.querySelector(`#blackboard g[data-id="${id}"] .eq-math`).innerHTML.replace(/ data-tag="old"/, "")));
+  expect(html[1]).toBe(html[0]);
+});
