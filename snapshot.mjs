@@ -201,7 +201,8 @@ export class Snapshotter {
         this.discard();
         free();
       }, timeout);
-      guard.unref?.();
+      // Not unref'd: the guard is bounded by the call's own time limit and must fire even when
+      // nothing else keeps the event loop alive (Node 22 otherwise tears the loop down mid-call).
       try {
         try {
           return await work();
@@ -221,7 +222,6 @@ export class Snapshotter {
         gaveUp = true;
         reject(new Error(`${label} timed out after ${Math.round(timeout / 1000)} s`));
       }, timeout);
-      timer.unref?.();
       onAbort = () => {
         gaveUp = true;
         reject(abortError());
