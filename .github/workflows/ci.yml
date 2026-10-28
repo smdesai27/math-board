@@ -22,8 +22,22 @@ jobs:
           node-version: "22"
           cache: npm
 
+      # Includes pi 1.4.0 itself (a devDependency): the type check and the loader tests use it.
       - name: Install dependencies
         run: npm ci
+
+      - name: Type check (index.ts against pi's types)
+        run: npm run typecheck
+
+      # public/, mcp/schemas.json and THIRD_PARTY_NOTICES.md are build outputs that are committed
+      # (pi installs packages without devDependencies, so it cannot build them). Rebuild and fail
+      # when they differ from the commit, including new files the commit lacks.
+      - name: Build outputs match the source
+        run: |
+          npm run build
+          git diff --exit-code -- public mcp/schemas.json THIRD_PARTY_NOTICES.md
+          untracked="$(git status --porcelain --untracked-files=all -- public mcp/schemas.json THIRD_PARTY_NOTICES.md)"
+          if [ -n "$untracked" ]; then echo "Not committed after npm run build:"; echo "$untracked"; exit 1; fi
 
       # Before npm test, so test/mcp.test.mjs's board_snapshot check uses the same Chromium as the
       # browser tests (without a headless browser it skips that check and says why).
@@ -36,12 +50,12 @@ jobs:
       - name: Browser tests
         run: npm run test:browser
 
-      # test:load finds pi through `npm root -g`; the scripts make their own temp data dirs.
-      - name: Install pi
-        run: npm install -g @earendil-works/pi-coding-agent@1.4.0
-
+      # The scripts load the extension through the pi in node_modules and make their own temp data dirs.
       - name: Pi loader and /reload tests
         run: npm run test:load
+
+      - name: End to end (update, layout check, snapshot, export)
+        run: node scripts/e2e-snapshot.mjs
 
       - name: Upload test results
         if: failure()

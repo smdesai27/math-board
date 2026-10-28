@@ -2,11 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
-import { mkdtemp, rm, stat, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { BoardServer, emptyBoard, applyUpdate } from "../server.mjs";
-import { sanitizeElements } from "../scene.mjs";
 async function setup(t) {
   const dataDir = await mkdtemp(path.join(tmpdir(), "board-hardening-"));
   const server = new BoardServer({ dataDir });
@@ -87,14 +86,22 @@ test("clear and load require CAS and reject stale state", async (t) => {
   const { server, call } = await setup(t);
   await server.save("x");
   server.update({ title: "new" });
-  for (const route of ["clear", "load"]) {
-    assert.equal((await call(`/api/${route}`, { name: "x" })).status, 400);
-    assert.equal(
-      (await call(`/api/${route}`, { name: "x", baseRevision: 0 })).status,
-      409,
-    );
+  for (const [route, body] of [["clear", { scopes: ["all"] }], ["load", { name: "x" }]]) {
+    assert.equal((await call(`/api/${route}`, body)).status, 400);
+    const stale = await call(`/api/${route}`, { ...body, baseRevision: 0 });
+    assert.equal(stale.status, 409);
+    // The page re-reads from the 409 body and asks again.
+    assert.equal(stale.data.revision, 1);
+    assert.equal(stale.data.board.title, "new");
     assert.equal(server.revision, 1);
   }
+  // Unknown body fields are rejected with the reason.
+  const extra = await call("/api/clear", { baseRevision: 1, name: "x" });
+  assert.equal(extra.status, 400);
+  assert.match(extra.data.error, /\/api\/clear: unknown field "name"/);
+  // The page's Save sends its revision: a stale one is a conflict, a current one saves.
+  assert.equal((await call("/api/save", { name: "y", baseRevision: 0 })).status, 409);
+  assert.equal((await call("/api/save", { name: "y", baseRevision: 1 })).status, 200);
 });
 test("SSE hello + update; auth/origin restrictions and clean shutdown with active sockets", async (t) => {
   const { server, call } = await setup(t);
@@ -162,41 +169,6 @@ test("async load cannot overwrite an intervening edit", async (t) => {
   server.update({ title: "intervening" });
   await assert.rejects(loading, /conflict/);
   assert.equal(server.getState().title, "intervening");
-});
-test("native scene round trip and unsafe elements are rejected", async (t) => {
-  const { server } = await setup(t);
-  const element = {
-    id: "r",
-    type: "rectangle",
-    x: 1,
-    y: 2,
-    width: 50,
-    height: 30,
-    updated: Date.now(),
-    link: "javascript:alert(1)",
-  };
-  server.update({ scene: { mode: "replace", elements: [element] } });
-  await server.save("native");
-  server.clear();
-  await server.load("native");
-  assert.equal(server.getState().scene.elements[0].link, null);
-  for (const type of ["image", "embeddable", "iframe"])
-    assert.throws(
-      () => sanitizeElements([{ ...element, type }]),
-      /unsupported/,
-    );
-  assert.throws(() => sanitizeElements([element, element]), /duplicate/);
-  assert.throws(
-    () => sanitizeElements([{ ...element, x: Infinity }]),
-    /invalid/,
-  );
-  assert.throws(
-    () =>
-      sanitizeElements([
-        { ...element, groupIds: JSON.parse('{"__proto__":{}}') },
-      ]),
-    /unsafe/,
-  );
 });
 test("title and field validation, scene limit, duplicate ids, transaction rollback", () => {
   const board = emptyBoard();

@@ -24,6 +24,12 @@ test("every demo lesson step is accepted as given, one lesson step per update", 
       }
       const board = server.getState();
       assert.equal(board.title, lesson.title);
+      // Every shape, artifact and equation the steps add is on the board (strict validation
+      // rejects instead of dropping, but a deleted or replaced item would show here too).
+      const given = lesson.steps.flatMap((step) => [...(step.scene?.shapes ?? []), ...(step.scene?.artifacts ?? []), ...(step.equations ?? []).filter((e) => e.op === "add")]);
+      const ids = new Set([...board.equations, ...board.scene.shapes, ...board.scene.artifacts].map((it) => it.id));
+      assert.equal(ids.size, given.length, `${lesson.slug}: ${given.length} items given`);
+      for (const it of given) if (it.id) assert.ok(ids.has(it.id), `${lesson.slug}: ${it.id} survived`);
       assert.deepEqual(board.chapters.map((c) => c.id), expected[lesson.slug]);
       const items = [...board.equations, ...board.scene.shapes, ...board.scene.artifacts];
       assert.ok(items.every((it) => it.chapter), `${lesson.slug}: every item belongs to a chapter`);

@@ -18,7 +18,10 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-process.env.PI_MATH_BOARD_DATA_DIR ??= "/tmp/math-board-icon-build";
+import { isolateDataDir } from "./lib/pi-host.mjs";
+
+// Importing server.mjs starts no board, but keep it away from real saves anyway.
+isolateDataDir("math-board-icon-build-");
 const root = fileURLToPath(new URL("../", import.meta.url));
 const { checkSvgSource, SVG_TAGS, SVG_ATTRS } = await import(path.join(root, "server.mjs"));
 

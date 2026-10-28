@@ -1,3 +1,8 @@
 node_modules/
 test-results/
 .data/
+.icon-cache/
+build-meta.json
+playwright-report/
+*.tgz
+.DS_Store

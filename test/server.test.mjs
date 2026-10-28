@@ -1,5 +1,5 @@
 /**
- * Math Board server tests (node:test, no external deps).
+ * math-board server tests (node:test, no external deps).
  * Run: node --test test/
  */
 import { test, before, after, describe } from "node:test";
@@ -188,7 +188,8 @@ describe("auth", () => {
       pathname: "/api/events",
       host: `127.0.0.1:${s.port}`,
     });
-    assert.ok(r.status === 401 || r.status === 400);
+    assert.equal(r.status, 401);
+    assert.match(r.body, /missing or invalid token/);
   });
 });
 
@@ -197,7 +198,7 @@ describe("static app", () => {
     const res = await fetch(`${base}/`);
     assert.equal(res.status, 200);
     const html = await res.text();
-    assert.match(html, /Pi Blackboard/);
+    assert.match(html, /<title>Blackboard<\/title>/);
     assert.match(html, /app\.css/);
     assert.doesNotMatch(html, /https?:\/\/(?!127\.0\.0\.1)/); // no CDN
   });
@@ -211,15 +212,10 @@ describe("static app", () => {
     assert.match(css.headers.get("content-type"), /css/);
   });
 
-  test("serves bundled styles and local Excalidraw fonts", async () => {
+  test("serves the bundled styles", async () => {
     const r = await fetch(`${base}/app.css`);
     assert.equal(r.status, 200);
     assert.match(await r.text(), /katex/i);
-    const font = await fetch(
-      `${base}/assets/fonts/Assistant/Assistant-Regular.woff2`,
-    );
-    assert.equal(font.status, 200);
-    assert.equal(font.headers.get("content-type"), "font/woff2");
   });
 
   test("no path traversal on font route", async () => {
@@ -272,21 +268,23 @@ describe("updates & conflicts", () => {
     assert.equal(s.revision, rev);
   });
 
-  test("invalid shapes are sanitized away", async () => {
+  test("an invalid shape rejects the whole update with the reason", async () => {
+    const rev = s.revision;
     const r = await req("POST", "/api/update", {
       body: {
         scene: {
           mode: "replace",
           shapes: [
-            { type: "bomb", code: "x" },
             { type: "text", text: "hi", x: 1, y: 1 },
+            { type: "bomb", code: "x" },
           ],
         },
       },
     });
-    assert.equal(r.status, 200);
-    assert.equal(r.json.board.scene.shapes.length, 1);
-    assert.equal(r.json.board.scene.shapes[0].type, "text");
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /scene\.shapes\[1\]: type must be one of stroke, rect, ellipse, line, arrow, text, got "bomb"/);
+    assert.equal(s.revision, rev, "nothing applied");
+    assert.equal(r.json.revision, rev);
   });
 
   test("unknown equation id errors 400", async () => {
@@ -394,22 +392,36 @@ describe("persistence", () => {
     );
   });
 
-  test("corrupt save file is rejected after re-sanitization", async () => {
+  test("a corrupt save file is rejected and leaves the board as it was", async () => {
+    const dir = path.join(dataDir, "saves");
+    await writeFile(path.join(dir, "corrupt.json"), '{"board": {"equations": [{"latex": "x"');
+    const before = (await req("GET", "/api/state")).json;
+    const r = await req("POST", "/api/load", { body: { name: "corrupt" } });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /save corrupt: .*not valid JSON/);
+    const after = (await req("GET", "/api/state")).json;
+    assert.equal(after.revision, before.revision);
+    assert.deepEqual(after.board, before.board);
+  });
+
+  test("a save with unusable items loads the rest and says what it skipped", async () => {
     const dir = path.join(dataDir, "saves");
     await writeFile(
-      path.join(dir, "corrupt.json"),
+      path.join(dir, "partial.json"),
       JSON.stringify({
         board: {
-          scene: { shapes: [{ type: "stroke", points: "nope" }] },
-          equations: [{ latex: "<script>x</script>" }],
+          scene: { shapes: [{ type: "stroke", points: "nope" }, { type: "text", id: "ok", text: "kept", x: 1, y: 2 }] },
+          equations: [{ id: "e", latex: "<script>x</script>" }, { id: "ok", latex: "y" }],
         },
       }),
     );
-    const r = await req("POST", "/api/load", { body: { name: "corrupt" } });
+    const r = await req("POST", "/api/load", { body: { name: "partial" } });
     assert.equal(r.status, 200);
-    // The bogus stroke was dropped; equation latex stays data (rendered as text, never HTML).
-    assert.equal(r.json.board.scene.shapes.length, 0);
-    assert.equal(r.json.board.equations[0].latex, "<script>x</script>");
+    // The bogus stroke and the duplicate id were skipped and reported; equation latex stays data
+    // (rendered as text, never HTML).
+    assert.deepEqual(r.json.board.scene.shapes.map((x) => x.id), ["ok"]);
+    assert.deepEqual(r.json.board.equations.map((x) => x.latex), ["<script>x</script>"]);
+    assert.match(r.json.skipped, /^skipped 1 shape, 1 item with a duplicate id \(a shape: stroke needs points \[\[x, y\], \.\.\.\]; duplicate id "ok"\)$/);
   });
 });
 
@@ -464,17 +476,27 @@ describe("pure update logic", () => {
 });
 
 describe("server lifecycle", () => {
-  test("stop is idempotent and frees the port", async () => {
-    const s2 = new BoardServer({ dataDir });
+  test("stop is idempotent and frees the port; the next board in this process reuses port and token", async () => {
+    const own = await mkdtemp(path.join(tmpdir(), "math-board-test-"));
+    const s2 = new BoardServer({ dataDir: own });
     await s2.start();
-    const { port } = s2;
+    const { port, token } = s2;
     await s2.stop();
     await s2.stop();
-    // The port should be free again: binding 0 should not throw, and a
-    // fresh server can pick any port (possibly the same one).
-    const s3 = new BoardServer({ dataDir });
+    await assert.rejects(fetch(`http://127.0.0.1:${port}/`), "nothing listens on the port");
+    // An open tab keeps its URL: the next board on this data folder takes the same port and token.
+    const s3 = new BoardServer({ dataDir: own });
     await s3.start();
+    assert.equal(s3.port, port);
+    assert.equal(s3.token, token);
+    // While s3 runs, another board on the same folder gets its own port and token.
+    const s4 = new BoardServer({ dataDir: own });
+    await s4.start();
+    assert.notEqual(s4.port, port);
+    assert.notEqual(s4.token, token);
+    await s4.stop();
     await s3.stop();
+    await rm(own, { recursive: true, force: true });
   });
 
   test("url carries the token in the fragment", async () => {
@@ -498,24 +520,27 @@ test("item ops update, move and delete any item kind and re-validate", async () 
     { op: "move", id: "l", dx: 10, dy: 5 },
     { op: "move", id: "e", dx: 2, dy: 3 },
     { op: "move", id: "a", dx: 1, dy: 1 },
-    { op: "update", id: "t", color: "#f2c14e", font: "comic" },
+    { op: "update", id: "t", color: "#f2c14e", font: "mono" },
     { op: "delete", id: "a" },
   ] });
   assert.deepEqual(b.scene.shapes[0].points, [[10, 5], [11, 6]]);
   assert.deepEqual([b.equations[0].x, b.equations[0].y], [90, 95]);
   assert.equal(b.scene.shapes[1].color, "#f2c14e");
-  assert.equal(b.scene.shapes[1].font, undefined, "invalid enum dropped on re-validation");
+  assert.equal(b.scene.shapes[1].font, "mono");
   assert.equal(b.scene.artifacts.length, 0);
+  // An invalid value is rejected with the field's name instead of being dropped.
+  assert.throws(() => applyUpdate(b, { items: [{ op: "update", id: "t", font: "comic" }] }), /items\[0\] \("update" "t"\): font must be one of serif, sans, mono, got "comic"/);
+  assert.throws(() => applyUpdate(b, { items: [{ op: "update", id: "t", fields: { colour: "red" } }] }), /unknown field "colour" \(did you mean "color"\?\)/);
   assert.throws(() => applyUpdate(b, { items: [{ op: "move", id: "nope", dx: 1, dy: 1 }] }), /unknown item id/);
-  assert.throws(() => applyUpdate(b, { items: [{ op: "update", id: "l", points: [] }] }), /invalid/);
+  assert.throws(() => applyUpdate(b, { items: [{ op: "update", id: "l", points: [] }] }), /line needs at least 2 points/);
 });
 
-test("audit fixes: text may mention url(), unquoted attributes rejected, artifact opacity kept", () => {
+test("SVG text may mention url(), unquoted attributes are rejected, artifact opacity is kept", () => {
   const ok = (inner) => sanitizeArtifact({ type: "svg", source: `<svg viewBox="0 0 9 9">${inner}</svg>` });
   ok("<text>resolved via url(example) and curl(x); @import is just a word</text>");
   assert.throws(() => ok('<rect fill="url(http://x)"/>'), /url\(/);
   assert.throws(() => ok("<style>@import 'x';</style>"), /@import/);
-  assert.throws(() => ok('<path onload=alert(1) d="M0 0"/>'), /unquoted/);
+  assert.throws(() => ok('<path onload=alert(1) d="M0 0"/>'), /not well-formed XML.*quote every attribute value/);
   assert.equal(sanitizeArtifact({ type: "svg", source: '<svg viewBox="0 0 1 1"><rect width="1" height="1"/></svg>', opacity: 0.4 }).opacity, 0.4);
 });
 
@@ -584,7 +609,7 @@ test("steps: one per update by default, explicit steps kept, restore preserves t
   assert.equal(b.lastStep, 0);
 });
 
-test("phase 4 artifacts: plots validate expressions, molecules validate SMILES, icons must exist", async () => {
+test("artifacts: plots validate expressions, molecules validate SMILES, icons must exist", async () => {
   const { sanitizeArtifact, searchIcons, iconIndex } = await import("../server.mjs");
   const { compileExpr } = await import("../shared/expr.mjs");
   assert.equal(compileExpr("2x^2 + 3(x-1)", ["x"])({ x: 2 }), 11);

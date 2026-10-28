@@ -6,15 +6,15 @@
  *
  *   node scripts/demo-lessons.mjs <out-dir> [physics|mri|chem ...]
  *
- * Needs Pi (global install or PI_HOST_ROOT) and a headless Chromium, like scripts/e2e-snapshot.mjs.
- * The board's data directory is a fresh temporary folder unless PI_MATH_BOARD_DATA_DIR is set.
+ * Needs pi (global install, this checkout's devDependency, or PI_HOST_ROOT) and a headless
+ * Chromium, like scripts/e2e-snapshot.mjs. The board's data folder is a fresh temporary folder
+ * unless MATH_BOARD_DATA_DIR is set.
  */
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { LESSONS } from "./demo-lessons-data.mjs";
+import { ROOT as root, isolateDataDir, piHostRoot } from "./lib/pi-host.mjs";
 
 const [outArg, ...only] = process.argv.slice(2);
 if (!outArg) {
@@ -24,9 +24,8 @@ if (!outArg) {
 const out = path.resolve(outArg);
 mkdirSync(out, { recursive: true });
 // Isolated data dir: never read or overwrite the user's saves/autosave.
-process.env.PI_MATH_BOARD_DATA_DIR ??= mkdtempSync(path.join(tmpdir(), "math-board-demo-"));
-const root = fileURLToPath(new URL("../", import.meta.url));
-const host = process.env.PI_HOST_ROOT || path.join(execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim(), "@earendil-works/pi-coding-agent");
+isolateDataDir("math-board-demo-");
+const host = piHostRoot();
 const { loadExtensions } = await import(pathToFileURL(path.join(host, "dist/core/extensions/loader.js")));
 const ext = (await loadExtensions([path.join(root, "index.ts")], root)).extensions[0];
 const tool = (n) => ext.tools.get(n).definition;

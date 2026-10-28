@@ -1,25 +1,24 @@
 /** Exercise the installed Pi loader and an in-process pi session, without credentials, network providers or configuration changes. */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import path from "node:path";
+import { ROOT as root, isolateDataDir, piHostRoot } from "./lib/pi-host.mjs";
 // Isolated data dir: never read or overwrite the user's saves/autosave.
-process.env.PI_MATH_BOARD_DATA_DIR ??= mkdtempSync(path.join(tmpdir(), "math-board-test-"));
-// Isolated learning folder for the board_teaching prompt section. index.ts reads PI_LEARN_DIR
-// when it is loaded, so set it first (real path: pi resolves session cwds through symlinks).
+isolateDataDir();
+// Isolated learning folder for the board_teaching prompt section. index.ts reads
+// MATH_BOARD_LEARN_DIR when it is loaded, so set it first. It is a symlink to the real folder:
+// pi resolves session cwds through symlinks, and the rule must still match.
 const learnDir = realpathSync(mkdtempSync(path.join(tmpdir(), "math-board-learn-")));
-process.env.PI_LEARN_DIR = learnDir;
+const learnLink = path.join(realpathSync(mkdtempSync(path.join(tmpdir(), "math-board-learn-link-"))), "Learn");
+symlinkSync(learnDir, learnLink);
+process.env.MATH_BOARD_LEARN_DIR = learnLink;
 const subagentName = process.env.PI_SUBAGENT_NAME;
+const teachingMode = process.env.MATH_BOARD_TEACHING;
 delete process.env.PI_SUBAGENT_NAME;
-const root = fileURLToPath(new URL("../", import.meta.url));
-const host =
-  process.env.PI_HOST_ROOT ||
-  path.join(
-    execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim(),
-    "@earendil-works/pi-coding-agent",
-  );
+delete process.env.MATH_BOARD_TEACHING;
+const host = piHostRoot();
 const { loadExtensions } = await import(
   pathToFileURL(path.join(host, "dist/core/extensions/loader.js"))
 );
@@ -37,6 +36,12 @@ assert.ok((await completions("")).includes("export"));
 assert.deepEqual(await completions("ex"), ["export"]);
 assert.ok(![...ext.tools.keys()].some((name) => /export/.test(name)));
 const def = (name) => ext.tools.get(name).definition;
+// Per-turn cost budgets in characters (description + JSON schema); README quotes the measured numbers.
+const BUDGET = { board_open: 1000, board_update: 9600, total: 12800 };
+// index.ts stamps its imports with the same file list the server watches.
+const serverModule = await import(pathToFileURL(path.join(root, "server.mjs")).href);
+const indexFiles = JSON.parse(readFileSync(path.join(root, "index.ts"), "utf8").match(/const SERVER_FILES = (\[[^\]]*\])/)[1]);
+assert.deepEqual(indexFiles, [...serverModule.SOURCE_FILES], "index.ts SERVER_FILES must equal server.mjs SOURCE_FILES");
 
 // Lazy activation. The loader result has no active set (pi's AgentSession activates direct and
 // model-only tools on registration), so check the exposure here; the session test below checks
@@ -50,25 +55,26 @@ const size = (name) => def(name).description.length + JSON.stringify(def(name).p
 const sizes = Object.fromEntries([...ext.tools.keys()].map((name) => [name, size(name)]));
 const total = Object.values(sizes).reduce((a, b) => a + b, 0);
 assert.ok(def("board_open").description.length <= 300, `board_open description: ${def("board_open").description.length}`);
-assert.ok(sizes.board_open < 1000, `board_open: ${sizes.board_open}`);
+assert.ok(sizes.board_open < BUDGET.board_open, `board_open: ${sizes.board_open}`);
 assert.ok(def("board_update").description.length < 1000, `board_update description: ${def("board_update").description.length}`);
-// The target was 6,000, but board_update's schema without any description is 7,396 characters
-// and its types are unchanged on purpose; everything above that floor is guarded here.
-assert.ok(sizes.board_update < 9000, `board_update: ${sizes.board_update}`);
-assert.ok(total < 12000, `all board tools: ${total}`);
+// The target was 6,000, but board_update's schema without any description is about 7,400
+// characters and its types are unchanged on purpose (additionalProperties:false on every object
+// adds about 500); everything above that floor is guarded here.
+assert.ok(sizes.board_update < BUDGET.board_update, `board_update: ${sizes.board_update}`);
+assert.ok(total < BUDGET.total, `all board tools: ${total}`);
 console.log(`sizes (description + schema): ${JSON.stringify(sizes)}; total ${total}; active before board_open ${sizes.board_open}`);
 
-// One implementation: the MCP server (mcp/server.mjs) builds the same tools from tools.mjs with the
-// `typebox` package instead of pi's Type. Names, labels, descriptions, annotations and JSON schemas
-// must match what pi registered, so the sizes above are also what an MCP client sees.
+// One implementation: the MCP server (mcp/server.mjs) serves the same tools from tools.mjs, with
+// the schemas `npm run build` wrote to mcp/schemas.json. Names, labels, descriptions, annotations
+// and JSON schemas must match what pi registered, so the sizes above are also what an MCP client sees.
 const shared = await import(pathToFileURL(path.join(root, "tools.mjs")).href);
-const mcpSchemas = shared.buildSchemas((await import("typebox")).Type);
+const mcpSchemas = JSON.parse(readFileSync(path.join(root, "mcp", "schemas.json"), "utf8"));
 assert.deepEqual(shared.TOOLS.map((t) => t.name), [...ext.tools.keys()]);
 for (const t of shared.TOOLS) {
   assert.equal(def(t.name).description, t.description, t.name);
   assert.equal(def(t.name).label, t.label, t.name);
   assert.deepEqual(def(t.name).annotations, t.annotations, t.name);
-  assert.equal(JSON.stringify(mcpSchemas[t.name]), JSON.stringify(def(t.name).parameters), `${t.name}: MCP schema differs from pi's`);
+  assert.equal(JSON.stringify(mcpSchemas[t.name]), JSON.stringify(def(t.name).parameters), `${t.name}: mcp/schemas.json differs from pi's schema (run npm run build)`);
 }
 
 const notices = [];
@@ -91,7 +97,8 @@ for (const topic of topics) {
 }
 await assert.rejects(tool("board_docs").execute("docs-bad", { topic: "nope" }, undefined, undefined, ctx), /unknown topic/);
 
-// board_teaching: added in the learning folder only, never in subagents, and constant.
+// board_teaching: added in the learning folder only (also when it is reached through a symlink),
+// never in subagents, and constant; MATH_BOARD_TEACHING=always|never overrides the rule.
 const { normalizeBuildSystemPromptOptions, buildSystemPrompt } = await import(
   pathToFileURL(path.join(host, "dist/core/system-prompt.js"))
 );
@@ -108,11 +115,17 @@ for (const name of ["board_open", "board_read", "board_update", "board_docs"]) a
 assert.doesNotMatch(teaching, /\d{1,2}:\d{2}|\/Users\/|\/Volumes\/|~\//); // no clock times or paths
 assert.equal((await startRun(learnDir)).sections.board_teaching, teaching); // the folder itself; same text again
 assert.match(buildSystemPrompt(await startRun(learnDir)), /<board_teaching>\n[\s\S]*step 4, eq2[\s\S]*\n<\/board_teaching>/);
+assert.equal((await startRun(path.join(learnLink, "physics"))).sections.board_teaching, teaching); // through the link
 assert.equal((await startRun(root)).sections.board_teaching, undefined);
 assert.equal((await startRun(`${learnDir}-other`)).sections.board_teaching, undefined);
 process.env.PI_SUBAGENT_NAME = "worker";
 assert.equal((await startRun(path.join(learnDir, "linear-algebra"))).sections.board_teaching, undefined);
+process.env.MATH_BOARD_TEACHING = "always";
+assert.equal((await startRun(root)).sections.board_teaching, teaching, "always: everywhere, subagents too");
 delete process.env.PI_SUBAGENT_NAME;
+process.env.MATH_BOARD_TEACHING = "never";
+assert.equal((await startRun(learnDir)).sections.board_teaching, undefined, "never: not even in the learning folder");
+delete process.env.MATH_BOARD_TEACHING;
 
 // The loader alone leaves pi's action methods unbound (they throw), so stand in for the
 // session's active tool set.
@@ -135,6 +148,15 @@ try {
   assert.match(notices.at(-1).text, /Board server: not running/);
   await ext.commands.get("board").handler("help", ctx);
   assert.match(notices.at(-1).text, /\/board export \[n\]/);
+  // A multi-word save name is one name: `/board save my lesson` saves my-lesson.
+  await ext.commands.get("board").handler("open", ctx);
+  await ext.commands.get("board").handler("save my lesson", ctx);
+  assert.match(notices.at(-1).text, /^Saved "my-lesson"/);
+  await ext.commands.get("board").handler("status", ctx);
+  assert.match(notices.at(-1).text, /^Board server: running at 127\.0\.0\.1:\d+ .*0 browsers watching\)\n {2}data folder: /);
+  await ext.commands.get("board").handler("stop", ctx);
+  active = ["read", "bash", "edit", "write", "board_open"];
+  setCalls = 0;
   // Two parallel first calls share one lazy server.
   const [a, b] = await Promise.all([
     tool("board_read").execute("a", {}, undefined, undefined, ctx),
@@ -163,6 +185,18 @@ try {
   );
   assert.equal(state.details.board.title, "Loader smoke test");
   assert.equal(state.details.revision, 1);
+  // A misplaced field never reaches the board: pi's argument validation refuses it against the
+  // closed schema, and the handler refuses it too when called directly.
+  const validationEntry = [path.join(host, "node_modules/@earendil-works/pi-ai/dist/utils/validation.js"), path.join(host, "../pi-ai/dist/utils/validation.js")].find(existsSync);
+  if (validationEntry) {
+    const { validateToolArguments } = await import(pathToFileURL(validationEntry));
+    const piTool = { name: "board_update", description: "", parameters: def("board_update").parameters };
+    const args = (a) => ({ type: "toolCall", id: "v", name: "board_update", arguments: a });
+    assert.throws(() => validateToolArguments(piTool, args({ baseRevision: 1, shapes: [] })), /shapes|additional/i);
+    assert.throws(() => validateToolArguments(piTool, args({ baseRevision: 1, scene: { mode: "append", shapes: [{ type: "text", text: "x", x: 1, y: 2, colour: "red" }] } })), /colour|additional|must match/i);
+    validateToolArguments(piTool, args({ baseRevision: 1, equations: [{ op: "add", id: "e", latex: "x" }], scene: { mode: "append", shapes: [{ type: "text", id: "t", text: "x", x: 1, y: 2 }] } }));
+  }
+  await assert.rejects(tool("board_update").execute("bad", { baseRevision: 1, shapes: [] }, undefined, undefined, ctx), /unknown update field: shapes/);
   const conflict = await tool("board_update").execute(
     "e",
     { baseRevision: 0, title: "stale" },
@@ -218,7 +252,7 @@ try {
   }
 }
 console.log(
-  "PASS: idempotent session_shutdown. No model requests, browser launch, symlinks or configuration writes.",
+  "PASS: idempotent session_shutdown. No model requests, browser launch or configuration writes (the learning-folder symlink is in a temporary folder).",
 );
 
 /*
@@ -290,10 +324,11 @@ if (!sdk.createAgentSession || !sdk.DefaultResourceLoader || !ai.fauxProvider) {
     await session.prompt("Explain vectors on the board.");
     assert.equal(requests.length, 2);
     assert.deepEqual(requests[0].tools.filter((n) => n.startsWith("board_")), ["board_open"]);
-    assert.ok(requests[0].boardChars < 1000, `board tools declared before board_open: ${requests[0].boardChars}`);
+    assert.ok(requests[0].boardChars < BUDGET.board_open, `board tools declared before board_open: ${requests[0].boardChars}`);
     assert.equal(requests[0].teaching, true);
     assert.deepEqual(requests[1].tools.filter((n) => n.startsWith("board_")).sort(), [...BOARD_TOOLS, "board_open"].sort());
-    assert.ok(requests[1].boardChars < 12000, `board tools declared after board_open: ${requests[1].boardChars}`);
+    assert.ok(requests[1].boardChars < BUDGET.total, `board tools declared after board_open: ${requests[1].boardChars}`);
+    assert.equal(requests[1].boardChars, total, "pi declares exactly the measured tools");
     assert.deepEqual(boardActive(), [...BOARD_TOOLS, "board_open"].sort());
     // /reload re-registers the tools; the active set survives and the tools still work.
     await session.reload();
@@ -314,7 +349,7 @@ if (!sdk.createAgentSession || !sdk.DefaultResourceLoader || !ai.fauxProvider) {
 /*
  * Installed as a package (`pi install <folder>` adds it to the settings' packages), pi also checks
  * package.json: host-provided packages (typebox, pi-ai, ...) listed in `dependencies` give an
- * extension warning. The MCP server's typebox is an optionalDependency for that reason. Load this
+ * extension warning (this package has none: the MCP server's schemas are prebuilt JSON). Load this
  * folder the way an install does and expect no warnings; a stand-in package with typebox in
  * `dependencies` shows that the check is live.
  */
@@ -347,3 +382,4 @@ if (!sdk.DefaultResourceLoader || !sdk.SettingsManager?.inMemory) {
   console.log("PASS: installed as a package, pi reports no manifest warnings (a control package with typebox in dependencies does warn).");
 }
 if (subagentName !== undefined) process.env.PI_SUBAGENT_NAME = subagentName;
+if (teachingMode !== undefined) process.env.MATH_BOARD_TEACHING = teachingMode;

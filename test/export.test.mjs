@@ -6,14 +6,15 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, copyFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, copyFile, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { BoardServer } from "../server.mjs";
+import { BoardServer, SCHEMA_VERSION, CHAPTER } from "../server.mjs";
 import {
   EXPORT_WIDTH,
   HOME_REGION,
   OVERVIEW_WIDTH,
+  SCHEMA_VERSION as EXPORT_SCHEMA_VERSION,
   exportLesson,
   exportNotice,
   overviewRegion,
@@ -72,7 +73,7 @@ test("slugs: lowercase a-z0-9 and hyphens, at most 48 characters, valid save nam
   assert.equal(slugify(undefined), "");
   const long = slugify(`${"a".repeat(47)} bcd`);
   assert.equal(long, "a".repeat(47)); // cut at 48, trailing hyphen dropped
-  for (const s of ["x", slugify("Pi Blackboard"), slugify("z".repeat(200)), long]) {
+  for (const s of ["x", slugify("Blackboard"), slugify("z".repeat(200)), long]) {
     assert.ok(s.length <= 48, s);
     assert.match(s, /^[a-z0-9]+(-[a-z0-9]+)*$/);
     assert.match(s, SAVE_NAME_RE);
@@ -207,7 +208,7 @@ test("home.png only when home has items; overview only with more than one region
   const empty = await exportLesson({ board: new BoardServer({ dataDir: cwd, autosave: false }).getState(), revision: 0, cwd, snapshot: renderer().snapshot, now });
   assert.deepEqual(empty.images, []);
   assert.equal(empty.empty, true);
-  assert.match(await read(empty.dir, "lesson.md"), /# Pi Blackboard\n\nExported 2026-10-27 14:05 · board revision 0 · 0 steps\n\nThe board is empty/);
+  assert.match(await read(empty.dir, "lesson.md"), /# Blackboard\n\nExported 2026-10-27 14:05 · board revision 0 · 0 steps\n\nThe board is empty/);
   assert.match(exportNotice(empty), /0 images, board\.json, lesson\.md\n {2}The board is empty/);
 });
 
@@ -270,4 +271,29 @@ test("one image failing after others rendered is skipped and named; the rest are
   assert.deepEqual(r.skipped, [{ file: "chapter-ch2.png", reason: "no headless browser available (stub). Run: npx playwright install chromium" }]);
   assert.match(await read(r.dir, "lesson.md"), /## Second law\n\n_Image not rendered: no headless browser available \(stub\)\. Run: npx playwright install chromium_\n/);
   assert.match(exportNotice(r), /3 images \(home\.png, chapter-ch1\.png, overview\.png\), board\.json, lesson\.md\n {2}Skipped chapter-ch2\.png: no headless/);
+});
+
+test("files are private, the format version matches saves, and a symlinked viz/ is refused", async () => {
+  assert.equal(EXPORT_SCHEMA_VERSION, SCHEMA_VERSION);
+  assert.deepEqual(HOME_REGION, { x: 0, y: 0, w: CHAPTER.w, h: CHAPTER.h });
+  const s = await lesson();
+  const cwd = await tempDir("board-export-cwd-");
+  const r = await exportLesson({ board: s.getState(), revision: s.revision, cwd, snapshot: renderer().snapshot, now });
+  assert.equal(JSON.parse(await read(r.dir, "board.json")).schemaVersion, SCHEMA_VERSION);
+  assert.equal((await stat(path.join(cwd, "viz"))).mode & 0o777, 0o700);
+  assert.equal((await stat(r.dir)).mode & 0o777, 0o700);
+  for (const file of r.files) assert.equal((await stat(path.join(r.dir, file))).mode & 0o777, 0o600, file);
+  // viz/ pointing somewhere else (planted in an untrusted folder) is not followed.
+  const elsewhere = await tempDir("board-export-target-");
+  const linked = await tempDir("board-export-linked-");
+  await symlink(elsewhere, path.join(linked, "viz"));
+  await assert.rejects(
+    exportLesson({ board: s.getState(), revision: s.revision, cwd: linked, snapshot: renderer().snapshot, now }),
+    /viz is a symbolic link .*writes only into a real folder/,
+  );
+  assert.deepEqual(await readdir(elsewhere), []);
+  // A file named viz is not a folder either.
+  const fileCwd = await tempDir("board-export-file-");
+  await (await import("node:fs/promises")).writeFile(path.join(fileCwd, "viz"), "x");
+  await assert.rejects(exportLesson({ board: s.getState(), revision: s.revision, cwd: fileCwd, now }), /exists and is not a folder/);
 });

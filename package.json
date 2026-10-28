@@ -1,31 +1,73 @@
 {
   "name": "pi-math-board",
-  "version": "0.2.0",
-  "description": "Pi companion blackboard: a view-only browser board the model draws on \u2014 KaTeX equations, chemistry, plots, molecules, science illustrations, SVG and Mermaid diagrams, chapters with camera moves, step-by-step animation, snapshots and autosave.",
+  "version": "0.3.0",
+  "description": "A view-only chalkboard in the browser that a terminal tutor draws on: equations, plots, molecules, diagrams and science illustrations, built up one step at a time. A pi extension and an MCP server.",
   "keywords": [
-    "pi-package"
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "mcp",
+    "mcp-server",
+    "claude-code",
+    "blackboard",
+    "chalkboard",
+    "tutor",
+    "learning",
+    "katex",
+    "mermaid",
+    "chemistry",
+    "physics"
   ],
-  "type": "module",
-  "dependencies": {
-    "@excalidraw/excalidraw": "0.18.1",
-    "@modelcontextprotocol/server": "2.4.0",
-    "katex": "0.19.1",
-    "mermaid": "11.17.2",
-    "playwright-core": "1.64.1",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "smiles-drawer": "2.4.1"
+  "homepage": "https://github.com/smdesai27/math-board#readme",
+  "bugs": {
+    "url": "https://github.com/smdesai27/math-board/issues"
   },
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smdesai27/math-board.git"
+  },
+  "license": "MIT",
+  "author": "Sanil Desai (https://github.com/smdesai27)",
+  "type": "module",
+  "bin": {
+    "pi-math-board": "mcp/server.mjs"
+  },
+  "files": [
+    "index.ts",
+    "tools.mjs",
+    "server.mjs",
+    "export.mjs",
+    "snapshot.mjs",
+    "native-import.mjs",
+    "shared/",
+    "mcp/",
+    "public/",
+    "browser/",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "SECURITY.md",
+    "CHANGELOG.md",
+    "docs/design.md"
+  ],
+  "engines": {
+    "node": ">=22.19"
+  },
+  "mcpName": "io.github.smdesai27/math-board",
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "@rgrove/parse-xml": "5.0.0",
+    "playwright-core": "1.64.1"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.mjs",
     "test:browser": "playwright test",
     "test:load": "node scripts/verify-import.mjs && node scripts/verify-reload.mjs",
+    "typecheck": "tsc --noEmit",
     "build:icons": "node scripts/build-icons.mjs"
   },
   "overrides": {
-    "nanoid": "3.3.18",
     "lodash-es": "4.18.1",
     "katex": "$katex"
   },
@@ -36,8 +78,7 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "typebox": "*"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-ai": {
@@ -45,17 +86,21 @@
     },
     "@earendil-works/pi-coding-agent": {
       "optional": true
-    },
-    "typebox": {
-      "optional": true
     }
   },
-  "optionalDependencies": {
-    "typebox": "1.3.27"
-  },
   "devDependencies": {
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
     "@modelcontextprotocol/client": "2.4.0",
     "@playwright/test": "1.64.1",
-    "esbuild": "0.28.2"
+    "@types/node": "22.20.5",
+    "esbuild": "0.28.2",
+    "katex": "0.19.1",
+    "mermaid": "11.17.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "smiles-drawer": "2.4.1",
+    "typebox": "1.3.27",
+    "typescript": "6.0.3"
   }
 }

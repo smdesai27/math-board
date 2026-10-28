@@ -1,0 +1,1105 @@
+{
+  "board_open": {
+    "type": "object",
+    "properties": {}
+  },
+  "board_read": {
+    "type": "object",
+    "properties": {
+      "includeScene": {
+        "type": "boolean",
+        "description": "Also return the scene JSON"
+      },
+      "includeSources": {
+        "type": "boolean",
+        "description": "Include artifact sources"
+      },
+      "chapter": {
+        "type": "string",
+        "description": "Chapter id, 'all' or 'free' (default: camera's)"
+      }
+    }
+  },
+  "board_update": {
+    "type": "object",
+    "required": [
+      "baseRevision"
+    ],
+    "properties": {
+      "baseRevision": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "title": {
+        "type": "string"
+      },
+      "clear": {
+        "type": "array",
+        "items": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "equations"
+            },
+            {
+              "type": "string",
+              "const": "scene"
+            },
+            {
+              "type": "string",
+              "const": "all"
+            }
+          ]
+        }
+      },
+      "equations": {
+        "type": "array",
+        "items": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "op",
+                "latex"
+              ],
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "const": "add"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "latex": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "x": {
+                  "type": "number",
+                  "description": "Omit x,y for auto layout"
+                },
+                "y": {
+                  "type": "number"
+                },
+                "color": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "number"
+                },
+                "z": {
+                  "type": "number"
+                },
+                "chapter": {
+                  "type": "string"
+                },
+                "step": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "reveal": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "const": "draw"
+                    },
+                    {
+                      "type": "string",
+                      "const": "write"
+                    },
+                    {
+                      "type": "string",
+                      "const": "wipe"
+                    },
+                    {
+                      "type": "string",
+                      "const": "fade"
+                    },
+                    {
+                      "type": "string",
+                      "const": "none"
+                    }
+                  ]
+                },
+                "duration": {
+                  "type": "number"
+                },
+                "order": {
+                  "type": "number"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "op",
+                "id"
+              ],
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "const": "update"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "latex": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "x": {
+                  "type": "number"
+                },
+                "y": {
+                  "type": "number"
+                },
+                "color": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "number"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "op",
+                "id"
+              ],
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "const": "delete"
+                },
+                "id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "chapters": {
+        "type": "array",
+        "items": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "op",
+                "id",
+                "title"
+              ],
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "const": "add"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "x": {
+                  "type": "number",
+                  "description": "Omit x,y to auto-place"
+                },
+                "y": {
+                  "type": "number"
+                },
+                "w": {
+                  "type": "number"
+                },
+                "h": {
+                  "type": "number"
+                },
+                "frame": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "op",
+                "id"
+              ],
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "const": "update"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "x": {
+                  "type": "number"
+                },
+                "y": {
+                  "type": "number"
+                },
+                "w": {
+                  "type": "number"
+                },
+                "h": {
+                  "type": "number"
+                },
+                "frame": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "op",
+                "id"
+              ],
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "const": "delete"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "keepItems": {
+                  "type": "boolean",
+                  "description": "Else its items are erased"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "camera": {
+        "anyOf": [
+          {
+            "type": "object",
+            "required": [
+              "chapter"
+            ],
+            "properties": {
+              "chapter": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "x",
+              "y",
+              "w",
+              "h"
+            ],
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "w": {
+                "type": "number"
+              },
+              "h": {
+                "type": "number"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "{chapter}, a board rect, or null = home"
+      },
+      "items": {
+        "type": "array",
+        "items": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "op",
+                "id",
+                "fields"
+              ],
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "const": "update"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "fields": {
+                  "type": "object",
+                  "patternProperties": {
+                    "^.*$": {}
+                  },
+                  "description": "Fields to set; type is fixed"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "op",
+                "id",
+                "dx",
+                "dy"
+              ],
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "const": "move"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "dx": {
+                  "type": "number"
+                },
+                "dy": {
+                  "type": "number"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "op",
+                "id"
+              ],
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "const": "delete"
+                },
+                "id": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "check": {
+        "type": "boolean"
+      },
+      "scene": {
+        "type": "object",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "append"
+              },
+              {
+                "type": "string",
+                "const": "replace"
+              }
+            ],
+            "description": "replace swaps the whole scene"
+          },
+          "shapes": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "points"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "stroke"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "z": {
+                      "type": "number"
+                    },
+                    "opacity": {
+                      "type": "number"
+                    },
+                    "chapter": {
+                      "type": "string"
+                    },
+                    "step": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "reveal": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "draw"
+                        },
+                        {
+                          "type": "string",
+                          "const": "write"
+                        },
+                        {
+                          "type": "string",
+                          "const": "wipe"
+                        },
+                        {
+                          "type": "string",
+                          "const": "fade"
+                        },
+                        {
+                          "type": "string",
+                          "const": "none"
+                        }
+                      ]
+                    },
+                    "duration": {
+                      "type": "number"
+                    },
+                    "order": {
+                      "type": "number"
+                    },
+                    "dash": {
+                      "type": "string"
+                    },
+                    "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        },
+                        "minItems": 2,
+                        "maxItems": 2
+                      },
+                      "minItems": 2
+                    },
+                    "color": {
+                      "type": "string"
+                    },
+                    "width": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "x",
+                    "y",
+                    "w",
+                    "h"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "rect"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "z": {
+                      "type": "number"
+                    },
+                    "opacity": {
+                      "type": "number"
+                    },
+                    "chapter": {
+                      "type": "string"
+                    },
+                    "step": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "reveal": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "draw"
+                        },
+                        {
+                          "type": "string",
+                          "const": "write"
+                        },
+                        {
+                          "type": "string",
+                          "const": "wipe"
+                        },
+                        {
+                          "type": "string",
+                          "const": "fade"
+                        },
+                        {
+                          "type": "string",
+                          "const": "none"
+                        }
+                      ]
+                    },
+                    "duration": {
+                      "type": "number"
+                    },
+                    "order": {
+                      "type": "number"
+                    },
+                    "dash": {
+                      "type": "string"
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    },
+                    "w": {
+                      "type": "number"
+                    },
+                    "h": {
+                      "type": "number"
+                    },
+                    "color": {
+                      "type": "string"
+                    },
+                    "fill": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "x",
+                    "y",
+                    "w",
+                    "h"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "ellipse"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "z": {
+                      "type": "number"
+                    },
+                    "opacity": {
+                      "type": "number"
+                    },
+                    "chapter": {
+                      "type": "string"
+                    },
+                    "step": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "reveal": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "draw"
+                        },
+                        {
+                          "type": "string",
+                          "const": "write"
+                        },
+                        {
+                          "type": "string",
+                          "const": "wipe"
+                        },
+                        {
+                          "type": "string",
+                          "const": "fade"
+                        },
+                        {
+                          "type": "string",
+                          "const": "none"
+                        }
+                      ]
+                    },
+                    "duration": {
+                      "type": "number"
+                    },
+                    "order": {
+                      "type": "number"
+                    },
+                    "dash": {
+                      "type": "string"
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    },
+                    "w": {
+                      "type": "number"
+                    },
+                    "h": {
+                      "type": "number"
+                    },
+                    "color": {
+                      "type": "string"
+                    },
+                    "fill": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "points"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "line"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "z": {
+                      "type": "number"
+                    },
+                    "opacity": {
+                      "type": "number"
+                    },
+                    "chapter": {
+                      "type": "string"
+                    },
+                    "step": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "reveal": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "draw"
+                        },
+                        {
+                          "type": "string",
+                          "const": "write"
+                        },
+                        {
+                          "type": "string",
+                          "const": "wipe"
+                        },
+                        {
+                          "type": "string",
+                          "const": "fade"
+                        },
+                        {
+                          "type": "string",
+                          "const": "none"
+                        }
+                      ]
+                    },
+                    "duration": {
+                      "type": "number"
+                    },
+                    "order": {
+                      "type": "number"
+                    },
+                    "dash": {
+                      "type": "string"
+                    },
+                    "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        },
+                        "minItems": 2,
+                        "maxItems": 2
+                      },
+                      "minItems": 2
+                    },
+                    "color": {
+                      "type": "string"
+                    },
+                    "width": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "points"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "arrow"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "z": {
+                      "type": "number"
+                    },
+                    "opacity": {
+                      "type": "number"
+                    },
+                    "chapter": {
+                      "type": "string"
+                    },
+                    "step": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "reveal": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "draw"
+                        },
+                        {
+                          "type": "string",
+                          "const": "write"
+                        },
+                        {
+                          "type": "string",
+                          "const": "wipe"
+                        },
+                        {
+                          "type": "string",
+                          "const": "fade"
+                        },
+                        {
+                          "type": "string",
+                          "const": "none"
+                        }
+                      ]
+                    },
+                    "duration": {
+                      "type": "number"
+                    },
+                    "order": {
+                      "type": "number"
+                    },
+                    "dash": {
+                      "type": "string"
+                    },
+                    "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        },
+                        "minItems": 2,
+                        "maxItems": 2
+                      },
+                      "minItems": 2,
+                      "maxItems": 4,
+                      "description": "Last segment gets the head"
+                    },
+                    "color": {
+                      "type": "string"
+                    },
+                    "width": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "text",
+                    "x",
+                    "y"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "text"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "z": {
+                      "type": "number"
+                    },
+                    "opacity": {
+                      "type": "number"
+                    },
+                    "chapter": {
+                      "type": "string"
+                    },
+                    "step": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "reveal": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "draw"
+                        },
+                        {
+                          "type": "string",
+                          "const": "write"
+                        },
+                        {
+                          "type": "string",
+                          "const": "wipe"
+                        },
+                        {
+                          "type": "string",
+                          "const": "fade"
+                        },
+                        {
+                          "type": "string",
+                          "const": "none"
+                        }
+                      ]
+                    },
+                    "duration": {
+                      "type": "number"
+                    },
+                    "order": {
+                      "type": "number"
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number",
+                      "description": "Baseline"
+                    },
+                    "size": {
+                      "type": "number"
+                    },
+                    "font": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "serif"
+                        },
+                        {
+                          "type": "string",
+                          "const": "sans"
+                        },
+                        {
+                          "type": "string",
+                          "const": "mono"
+                        }
+                      ]
+                    },
+                    "anchor": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "start"
+                        },
+                        {
+                          "type": "string",
+                          "const": "middle"
+                        },
+                        {
+                          "type": "string",
+                          "const": "end"
+                        }
+                      ]
+                    },
+                    "bold": {
+                      "type": "boolean"
+                    },
+                    "italic": {
+                      "type": "boolean"
+                    },
+                    "color": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "maxItems": 2000
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "patternProperties": {
+                "^.*$": {}
+              }
+            },
+            "maxItems": 100,
+            "description": "{type: plot|svg|mermaid|molecule|icon, x, y, width, height, ...}: see board_docs"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  },
+  "board_snapshot": {
+    "type": "object",
+    "properties": {
+      "region": {
+        "type": "object",
+        "required": [
+          "x",
+          "y",
+          "w",
+          "h"
+        ],
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "w": {
+            "type": "number",
+            "minimum": 10
+          },
+          "h": {
+            "type": "number",
+            "minimum": 10
+          }
+        },
+        "description": "Board-space area (default: camera view)"
+      },
+      "width": {
+        "type": "number",
+        "description": "Image px (default 1200, max 2400)"
+      },
+      "chapter": {
+        "type": "string",
+        "description": "Chapter to capture"
+      },
+      "overview": {
+        "type": "boolean",
+        "description": "All chapters"
+      }
+    }
+  },
+  "board_library": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Keywords, e.g. 'heart cross section'"
+      },
+      "category": {
+        "type": "string",
+        "description": "Category substring"
+      },
+      "limit": {
+        "type": "number",
+        "description": "Default 25"
+      }
+    }
+  },
+  "board_save": {
+    "type": "object",
+    "required": [
+      "action"
+    ],
+    "properties": {
+      "action": {
+        "anyOf": [
+          {
+            "type": "string",
+            "const": "save"
+          },
+          {
+            "type": "string",
+            "const": "load"
+          },
+          {
+            "type": "string",
+            "const": "list"
+          }
+        ],
+        "description": "load replaces the board"
+      },
+      "name": {
+        "type": "string",
+        "description": "[A-Za-z0-9._-], default 'default'"
+      },
+      "baseRevision": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Required for load"
+      }
+    }
+  },
+  "board_docs": {
+    "type": "object",
+    "required": [
+      "topic"
+    ],
+    "properties": {
+      "topic": {
+        "type": "string",
+        "enum": [
+          "overview",
+          "workflow",
+          "chapters",
+          "equations",
+          "marks",
+          "plot",
+          "svg",
+          "mermaid",
+          "molecule",
+          "icon",
+          "animation",
+          "layout",
+          "saves"
+        ],
+        "description": "overview lists what you can draw"
+      }
+    }
+  }
+}

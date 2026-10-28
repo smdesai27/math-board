@@ -1,19 +1,28 @@
-/** Manual end-to-end check: real Pi loader → board_update (auto lint) → board_snapshot PNG → /board export. */
+/**
+ * End-to-end check: real pi loader → board_update (layout check) → fix → board_snapshot PNG →
+ * /board export. Needs pi (global install, this checkout's devDependency, or PI_HOST_ROOT) and a
+ * headless Chromium. Writes the snapshot to the path given, else into a temporary folder.
+ */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import path from "node:path";
+import { ROOT as root, isolateDataDir, piHostRoot } from "./lib/pi-host.mjs";
 // Isolated data dir: never read or overwrite the user's saves/autosave.
-process.env.PI_MATH_BOARD_DATA_DIR ??= (await import("node:fs")).mkdtempSync((await import("node:path")).join((await import("node:os")).tmpdir(), "math-board-test-"));
-const root = fileURLToPath(new URL("../", import.meta.url));
-const host = process.env.PI_HOST_ROOT || path.join(execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim(), "@earendil-works/pi-coding-agent");
+isolateDataDir();
+const host = piHostRoot();
 const { loadExtensions } = await import(pathToFileURL(path.join(host, "dist/core/extensions/loader.js")));
 const ext = (await loadExtensions([path.join(root, "index.ts")], root)).extensions[0];
 const tool = (n) => ext.tools.get(n).definition;
 const ctx = { mode: "json", hasUI: false, cwd: root, ui: { notify() {}, setStatus() {} } };
-const out = process.argv[2] || "/tmp/board-e2e.png";
+const out = process.argv[2] || path.join(mkdtempSync(path.join(tmpdir(), "math-board-e2e-")), "board-e2e.png");
+/** The "layout warnings" lines of a result ([] when the check passed); fails when the check could not run. */
+const warningsOf = (text) => {
+  assert.doesNotMatch(text, /layout check unavailable/, text);
+  const m = /layout warnings \(\d+\):\n((?: {2}- .*\n?)+)/.exec(text);
+  return m ? m[1].trim().split("\n").map((l) => l.replace(/^\s*- /, "")) : [];
+};
 try {
   const t0 = Date.now();
   const r = await tool("board_update").execute("u", {
@@ -31,12 +40,25 @@ try {
     ] },
   }, undefined, undefined, ctx);
   console.log(`update (${Date.now() - t0}ms):\n` + r.content[0].text.split("\n").slice(0, 8).join("\n"));
+  // The layout check sees both deliberate problems and names the items.
+  const found = warningsOf(r.content[0].text);
+  assert.ok(found.some((w) => /equation eq\d overlaps equation eq\d/.test(w)), `overlap reported: ${found.join(" | ")}`);
+  assert.ok(found.some((w) => /text off extends off the board/.test(w)), `off-board text reported: ${found.join(" | ")}`);
   const r2 = await tool("board_update").execute("m", { baseRevision: 1, items: [{ op: "move", id: "eq2", dx: 0, dy: 120 }, { op: "update", id: "off", fields: { x: 900, anchor: "middle" } }] }, undefined, undefined, ctx);
   console.log("after fix:\n" + r2.content[0].text.split("\n").slice(0, 3).join("\n"));
+  assert.deepEqual(warningsOf(r2.content[0].text), [], "the fix clears both warnings");
+  assert.match(r2.content[0].text, /layout check: no overlaps or off-board items\./);
   const t1 = Date.now();
   const snap = await tool("board_snapshot").execute("s", {}, undefined, undefined, ctx);
-  writeFileSync(out, Buffer.from(snap.content[0].data, "base64"));
+  const png = Buffer.from(snap.content[0].data, "base64");
+  writeFileSync(out, png);
   console.log(`snapshot (${Date.now() - t1}ms) → ${out}\n` + snap.content[1].text);
+  assert.equal(snap.content[0].mimeType, "image/png");
+  assert.equal(png.subarray(0, 8).toString("hex"), "89504e470d0a1a0a", "PNG signature");
+  assert.equal(png.readUInt32BE(16), 1200, "PNG width");
+  assert.equal(png.readUInt32BE(20), 800, "PNG height");
+  assert.ok(png.length > 5000, `PNG is ${png.length} bytes`);
+  assert.match(snap.content[1].text, /layout check: no overlaps or off-board items\.[\s\S]*\[eq1\] equation /);
 
   // /board export through the registered command, into a temporary cwd: two chapters beside
   // the home board, so it writes home.png, a PNG per chapter and the overview.

@@ -17,12 +17,20 @@
  * neither pi nor a browser (test/export.test.mjs stubs the renderer). index.ts
  * passes the board server's headless snapshotter, the capture board_snapshot uses.
  * When the renderer is unavailable, board.json and lesson.md are still written.
+ *
+ * Files are private (folders 0700, files 0600, like saves), and a viz/ that is a symbolic link is
+ * refused rather than followed: the export writes only into a real folder under the cwd.
  */
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-/** The home board: items outside chapters use board coordinates, and home is (0,0)-(1200,800). */
+/** Version of the save format; board.json is a named save's payload (server.mjs SCHEMA_VERSION). */
+export const SCHEMA_VERSION = 1;
+const DIR_MODE = 0o700;
+const FILE_MODE = 0o600;
+
+/** The home board: items outside chapters use board coordinates, and home is (0,0)-(1200,800) (server.mjs CHAPTER). */
 export const HOME_REGION = Object.freeze({ x: 0, y: 0, w: 1200, h: 800 });
 /** PNG width of home and chapter images. */
 export const EXPORT_WIDTH = 1600;
@@ -69,7 +77,6 @@ export function homeItemCount(board) {
     ...(board?.equations ?? []),
     ...(board?.scene?.shapes ?? []),
     ...(board?.scene?.artifacts ?? []),
-    ...(board?.scene?.elements ?? []),
   ];
   return items.filter((it) => !it?.chapter || !chapters.has(it.chapter)).length;
 }
@@ -115,13 +122,28 @@ function chapterFile(id, taken) {
   return file;
 }
 
+/** <cwd>/viz as a real folder: created when missing, refused when it is a symbolic link or not a folder. */
+async function vizFolder(cwd) {
+  const viz = path.join(cwd, "viz");
+  let info = await lstat(viz).catch((error) => (error?.code === "ENOENT" ? null : Promise.reject(error)));
+  if (!info) {
+    await mkdir(viz, { recursive: true, mode: DIR_MODE });
+    info = await lstat(viz);
+  }
+  if (info.isSymbolicLink()) {
+    const target = await realpath(viz).catch(() => "a missing target");
+    throw new Error(`${viz} is a symbolic link (to ${target}); /board export writes only into a real folder. Replace the link with a folder, or run the export from the folder it points to.`);
+  }
+  if (!info.isDirectory()) throw new Error(`${viz} exists and is not a folder`);
+  return viz;
+}
+
 /** Create a new folder under parent, never reusing one: base, then base-2, base-3, ... */
 async function claimFolder(parent, base) {
-  await mkdir(parent, { recursive: true });
   for (let n = 1; n <= 1000; n++) {
     const dir = path.join(parent, n === 1 ? base : `${base}-${n}`);
     try {
-      await mkdir(dir);
+      await mkdir(dir, { mode: DIR_MODE });
       return dir;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
@@ -151,13 +173,13 @@ export async function exportLesson({
   if (typeof cwd !== "string" || !cwd) throw new Error("no folder to export into");
   const date = now();
   const slug = slugify(name) || slugify(board.title) || "board";
-  const dir = await claimFolder(path.join(cwd, "viz"), `board-${slug}-${folderStamp(date)}`);
+  const dir = await claimFolder(await vizFolder(cwd), `board-${slug}-${folderStamp(date)}`);
 
   // board.json is a named save's payload ({name, revision, savedAt, board}, see
   // BoardServer.save) plus exportedAt. Compact like a save, so a 6 MiB board still
   // fits the load limit: copy it to saves/<name>.json and `/board load <name>`.
   const exportedAt = date.toISOString();
-  await writeFile(path.join(dir, "board.json"), JSON.stringify({ name: slug, revision, savedAt: exportedAt, exportedAt, board }));
+  await writeFile(path.join(dir, "board.json"), JSON.stringify({ schemaVersion: SCHEMA_VERSION, name: slug, revision, savedAt: exportedAt, exportedAt, board }), { mode: FILE_MODE });
 
   // Images in note order: home first, then chapters in board order, the overview last.
   const chapters = Array.isArray(board.chapters) ? board.chapters : [];
@@ -184,7 +206,7 @@ export async function exportLesson({
     try {
       const png = await snapshot({ region: shot.region, width: shot.width });
       if (!png?.length) throw new Error("the renderer returned an empty image");
-      await writeFile(path.join(dir, shot.file), png);
+      await writeFile(path.join(dir, shot.file), png, { mode: FILE_MODE });
       images.push(shot.file);
       shot.written = true;
     } catch (error) {
@@ -209,7 +231,7 @@ export async function exportLesson({
     if (shot.written) lines.push(`![${mdText(shot.alt)}](${shot.file})`);
     else lines.push(shot.error === imageError ? "_Image not rendered._" : `_Image not rendered: ${mdText(shot.error)}_`);
   }
-  await writeFile(path.join(dir, "lesson.md"), lines.join("\n") + "\n");
+  await writeFile(path.join(dir, "lesson.md"), lines.join("\n") + "\n", { mode: FILE_MODE });
 
   return {
     dir,

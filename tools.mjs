@@ -14,41 +14,31 @@
  *     section; the MCP server's instructions).
  *
  * The handler context is small: { server(): Promise<BoardServer> (starts it lazily),
- * staleWarning(): string ("" when current), openHint: string (how the model gets the URL) }.
+ * staleWarning(): string ("" when current), openHint: string (how the model opens the board),
+ * signal?: AbortSignal (the tool call's; cancels a running layout check or snapshot) }.
  *
  * Like server.mjs, this module forwards its own cache-busting query (index.ts imports it with
- * ?v=<mtime>, see loadSourceModule) to server.mjs and export.mjs, so after pi's /reload the
+ * ?v=<mtime>, see loadSourceModules) to server.mjs and export.mjs, so after pi's /reload the
  * handlers and index.ts share one fresh server module. The MCP server imports it without a
  * query, which gives the same plain module instances it imports itself.
  */
 
-import { statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
 const VERSION_QUERY = new URL(import.meta.url).search;
-const { sanitizeShape, cameraRect, searchIcons, iconIndex, staleSources } = await import(
+const { cameraRect, searchIcons, iconIndex, staleSources, legacyEquationPositions, CHAPTER } = await import(
   new URL(`./server.mjs${VERSION_QUERY}`, import.meta.url).href
 );
 const { chapterRegion, overviewRegion } = await import(new URL(`./export.mjs${VERSION_QUERY}`, import.meta.url).href);
+
+/** The project's home, for hints that point outside the installed package. */
+export const REPO_URL = "https://github.com/smdesai27/math-board";
 
 /* ------------------------------------------------------------------ */
 /* Stale-source detection                                              */
 /* ------------------------------------------------------------------ */
 
-// server.mjs watches its own sources (and index.ts); this file is watched here.
-const SELF = fileURLToPath(import.meta.url);
-const mtime = (file) => {
-  try {
-    return statSync(file).mtimeMs;
-  } catch {
-    return 0;
-  }
-};
-const LOADED_STAMP = mtime(SELF);
-
-/** Board source files changed on disk since they were loaded (empty when current). */
+/** Board source files changed on disk since they were loaded (empty when current); server.mjs watches them all. */
 export function staleFiles() {
-  return [...staleSources(), ...(mtime(SELF) > LOADED_STAMP + 1 ? ["tools.mjs"] : [])];
+  return staleSources();
 }
 
 /* ------------------------------------------------------------------ */
@@ -127,21 +117,22 @@ export const BOARD_DOCS = Object.freeze({
     "1. board_read: note the revision, the chapter list and the free space in the chapter you are teaching.",
     "2. board_update with baseRevision = that revision. Build the explanation in small updates, one idea per update: " +
       "each update that adds items is one lesson step, drawn live for the learner and replayable step by step.",
-    "3. The result gives the new revision (your next baseRevision) and a measured layout check. Fix every warning " +
-      "(overlap, outside its chapter, failed to render) with items ops: {op:\"move\", id, dx, dy}, " +
+    "3. The result gives the new revision (your next baseRevision) and a measured layout check: this update's warnings first, then a count of " +
+      "older ones. Fix every warning (overlap, outside its chapter, failed to render) with items ops: {op:\"move\", id, dx, dy}, " +
       "{op:\"update\", id, fields:{...}} (type cannot change), {op:\"delete\", id}.",
+    "Invalid input (an unknown field, a wrong type, an empty text, a bad id) is rejected with the reason and nothing is applied: fix it and resend.",
     "4. After significant changes call board_snapshot to see the board as the learner does (chapter or region to zoom in).",
     "Conflicts: a conflict means the board changed since your read (the learner loaded a save or cleared it, or another call landed). " +
       "Call board_read and re-apply your intended change against the current revision; never resend a stale replace or delete blindly.",
-    "Ids: items get random ids unless you pass a short unique id (max 64 characters) when adding them, e.g. \"eq1\", \"force\". " +
-      "Short ids make later edits and the learner's references (\"step 4, eq2\") easy.",
+    "Ids: items get random ids unless you pass a short id (1-64 characters) when adding them, e.g. \"eq1\", \"force\". " +
+      "Ids are unique across shapes, artifacts and equations. Short ids make later edits and the learner's references (\"step 4, eq2\") easy.",
     "Order inside one update: title, clear ([\"equations\"|\"scene\"|\"all\"]; all also removes chapters), chapters, equations, scene, items, camera.",
     "check:false skips the layout check (faster for a burst of small edits; check again at the end).",
   ].join("\n"),
 
   chapters: [
-    "Chapters are named regions on an unbounded canvas, 1200x800 by default, placed left to right (240 px apart) when you omit x/y. " +
-      "Use one chapter per concept.",
+    "Chapters are named regions on an unbounded canvas, 1200x800 by default. Without x a chapter goes 240 px right of the rightmost one; " +
+      "without y it takes the last chapter's row. Overlapping chapters are reported. Use one chapter per concept.",
     "Add: chapters:[{op:\"add\", id:\"forces\", title:\"Newton's second law\"}] (optional x, y, w, h; frame:false hides the faint frame and title). " +
       "Update: {op:\"update\", id, title?, x?, y?, w?, h?, frame?}. Delete: {op:\"delete\", id} also erases the chapter's items unless keepItems:true " +
       "(they become free items).",
@@ -159,7 +150,8 @@ export const BOARD_DOCS = Object.freeze({
     "equations:[{op:\"add\", latex, id?, label?, x?, y?, color?, size?, chapter?, z?, step?, reveal?, duration?, order?}]",
     "- latex is KaTeX: \\frac, \\sum, \\int, \\begin{pmatrix}...\\end{pmatrix}, \\begin{aligned}...\\end{aligned}, \\underbrace, " +
       "\\color{#f2c14e}{...}, \\boxed{...}, \\cancel{...}; chemistry with \\ce{2H2 + O2 -> 2H2O} (mhchem).",
-    "- x,y = top-left of the equation box; the label sits above the formula. Omit both for automatic stacking down the left side.",
+    "- x,y = top-left of the equation box; the label sits above the formula. Omit them to stack it on the left of its chapter " +
+      "(x 88, 115 px apart); the position is stored and board_read shows it.",
     "- size = font scale (1 = about 27 px, range 0.3-4); color = CSS color of the formula.",
     "- {op:\"update\", id, latex?, label?, x?, y?, color?, size?} changes an equation, {op:\"delete\", id} removes it; " +
       "items ops (move, update any field) work on equations too.",
@@ -206,10 +198,11 @@ export const BOARD_DOCS = Object.freeze({
     "Allowed elements: svg g defs symbol use title desc style rect circle ellipse line polyline polygon path text tspan textPath marker " +
       "linearGradient radialGradient stop pattern clipPath mask animate animateTransform animateMotion mpath set. So markers (arrowheads), gradients, " +
       "patterns, clip paths, masks, a <style> block with CSS classes and SMIL animation all work.",
-    "Rejected: script, foreignObject, image, iframe, object, embed, DOCTYPE/ENTITY, on* event attributes, javascript: and data: URLs, @import, and every " +
-      "external reference: url(...) and href must point to an #id inside the same SVG. Quote every attribute value. Attributes outside the usual " +
-      "presentation and animation set are rejected; the error names the element or attribute. A missing xmlns is added.",
-    "An SVG that is not well-formed XML shows a red \"failed to render\" box and is reported in the layout check.",
+    "It must be well-formed XML (quote every attribute value); the parser's message says where it is not. Rejected: script, foreignObject, image, " +
+      "iframe, object, embed, DOCTYPE, CDATA, processing instructions, on* event attributes, javascript: and data: URLs, and every external reference: " +
+      "url(...) and href must point to an #id inside the same SVG. CSS may use colors, calc/var/min/max, transforms and url(#id), @keyframes and @media; " +
+      "no other functions, at-rules or backslash escapes. Attributes outside the usual presentation and animation set are rejected; the error names " +
+      "the element or attribute. A missing xmlns is added.",
     "Style: transparent background (no full-size white rect), font-family Georgia, serif, chalk colors (see overview), stroke widths 2-3. Default reveal \"wipe\".",
     ARTIFACT_COMMON,
     'Example source: <svg viewBox="0 0 400 200"><defs><marker id="h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">' +
@@ -220,7 +213,7 @@ export const BOARD_DOCS = Object.freeze({
   mermaid: [
     "{type:\"mermaid\", x, y, width, height, source}: Mermaid diagram text (at most 12,000 characters), laid out automatically and shown as an image " +
       "scaled into width x height. Flowcharts (graph/flowchart), sequenceDiagram, classDiagram, stateDiagram-v2, erDiagram, gantt, mindmap, timeline, pie.",
-    "Rendered with securityLevel strict: links, click/call callbacks, URLs and embedded HTML tags are rejected.",
+    "Rendered with securityLevel strict in the board's chalk theme: links, click/call callbacks, URLs, embedded HTML tags and %%{init}%% directives are rejected.",
     "Use it for processes and graphs where automatic layout beats placing boxes by hand; size the artifact generously. Default reveal \"wipe\".",
     ARTIFACT_COMMON,
     'Example: {"type":"mermaid","id":"resp","x":620,"y":120,"width":460,"height":260,' +
@@ -280,14 +273,14 @@ export const BOARD_DOCS = Object.freeze({
   ].join("\n"),
 
   saves: [
-    "Autosave: every change is written to autosave.json in the board's data directory (the extension's .data/ folder, or $PI_MATH_BOARD_DATA_DIR); " +
-      "a fresh board server restores it, so /reload or restarting pi keeps the board.",
+    "Autosave: every change is written to autosave.json in the board's data folder ($MATH_BOARD_DATA_DIR, else .data/ in a checkout, else a per-user " +
+      "folder), with three older copies; a fresh board server restores it, so /reload or a restart keeps the board. A failed autosave is reported in the results.",
     "Named snapshots with board_save: {action:\"save\", name} writes saves/<name>.json (letters, digits, . _ -; default \"default\"); " +
       "{action:\"list\"} lists the names; {action:\"load\", name, baseRevision} replaces the whole board, so board_read first and pass its revision. " +
       "The learner can also use /board save <name> and /board load <name>.",
-    "Loading re-validates everything; unsupported items are skipped instead of failing the load.",
+    "Loading re-validates everything; items it cannot use are skipped instead of failing the load, and the result says what was skipped.",
     "Save before clearing the board or switching topics, so the lesson can be reopened later.",
-    "Limits: 200 chapters, 1000 equations, 5000 scene items, 100 artifacts per update, 128 KiB per SVG, 6 MiB per board.",
+    "Limits: 200 chapters, 1000 equations, 5000 shapes and artifacts in total, 2000 shapes and 100 artifacts per update, 128 KiB per SVG, 6 MiB per board.",
   ].join("\n"),
 });
 
@@ -302,7 +295,7 @@ export const TOOLS = Object.freeze([
     label: "Open board",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description:
-      "Open the shared blackboard to teach visually: starts it, shows it in the learner's browser and activates the board tools (board_read, board_update, board_docs, ...). Returns the URL. Safe to call again.",
+      "Open the shared blackboard to teach visually: starts it, shows it in the learner's browser and activates the board tools (board_read, board_update, board_docs, ...). Returns the URL if no browser opens. Safe to call again.",
   },
   {
     name: "board_read",
@@ -328,6 +321,7 @@ export const TOOLS = Object.freeze([
       "Coordinates: the home board and every chapter are 1200x800, origin top-left, y down; items with `chapter` use that chapter's local coordinates. " +
       "Text y is the baseline; equation, rect, ellipse and artifact x,y is the top-left. " +
       "`baseRevision` = the revision from your last board_read or board_update (compare-and-swap); on a conflict, board_read again and re-apply your change to the current board, never retry blindly. " +
+      "Invalid input is rejected with the reason and nothing is applied. " +
       "Each result lists layout warnings (overlaps, items outside their chapter, failed renders): fix them with `items`. " +
       "Items also take id (short, e.g. \"eq1\"), z, opacity, dash, chapter, step, reveal, duration, order. " +
       "Formats and examples: board_docs.",
@@ -385,10 +379,13 @@ export function buildSchemas(Type) {
   // The reveal enum and the Style fields repeat in every item kind, so they carry no description
   // (board_update's description lists them once).
   const Reveal = Type.Union([Type.Literal("draw"), Type.Literal("write"), Type.Literal("wipe"), Type.Literal("fade"), Type.Literal("none")]);
+  // Closed objects: a misplaced or misspelled field is a validation error, never silently ignored.
+  const Closed = (properties, options) => Type.Object(properties, { additionalProperties: false, ...options });
 
   const EquationOpSchema = Type.Union([
-    Type.Object({
+    Closed({
       op: Type.Literal("add"),
+      id: Type.Optional(Type.String()),
       latex: Type.String(),
       label: Type.Optional(Type.String()),
       x: Type.Optional(Type.Number({ description: "Omit x,y for auto layout" })),
@@ -402,7 +399,7 @@ export function buildSchemas(Type) {
       duration: Type.Optional(Type.Number()),
       order: Type.Optional(Type.Number()),
     }),
-    Type.Object({
+    Closed({
       op: Type.Literal("update"),
       id: Type.String(),
       latex: Type.Optional(Type.String()),
@@ -412,7 +409,7 @@ export function buildSchemas(Type) {
       color: Type.Optional(Type.String()),
       size: Type.Optional(Type.Number()),
     }),
-    Type.Object({
+    Closed({
       op: Type.Literal("delete"),
       id: Type.String(),
     }),
@@ -422,27 +419,29 @@ export function buildSchemas(Type) {
   // tuple form (`items: [...]`), which Anthropic rejects as invalid 2020-12.
   const PointSchema = Type.Array(Type.Number(), { minItems: 2, maxItems: 2 });
 
-  // Styling and animation fields shared by every shape kind (listed once in board_update's description).
-  const Style = {
+  // Id, styling and animation fields shared by every shape kind (listed once in board_update's
+  // description); text takes no dash.
+  const TextStyle = {
+    id: Type.Optional(Type.String()),
     z: Type.Optional(Type.Number()),
     opacity: Type.Optional(Type.Number()),
-    dash: Type.Optional(Type.String()),
     chapter: Type.Optional(Type.String()),
     step: Type.Optional(Type.Integer({ minimum: 0 })),
     reveal: Type.Optional(Reveal),
     duration: Type.Optional(Type.Number()),
     order: Type.Optional(Type.Number()),
   };
+  const Style = { ...TextStyle, dash: Type.Optional(Type.String()) };
 
   const ShapeSchema = Type.Union([
-    Type.Object({
+    Closed({
       type: Type.Literal("stroke"),
       ...Style,
       points: Type.Array(PointSchema, { minItems: 2 }),
       color: Type.Optional(Type.String()),
       width: Type.Optional(Type.Number()),
     }),
-    Type.Object({
+    Closed({
       type: Type.Literal("rect"),
       ...Style,
       x: Type.Number(),
@@ -452,7 +451,7 @@ export function buildSchemas(Type) {
       color: Type.Optional(Type.String()),
       fill: Type.Optional(Type.String()),
     }),
-    Type.Object({
+    Closed({
       type: Type.Literal("ellipse"),
       ...Style,
       x: Type.Number(),
@@ -462,23 +461,23 @@ export function buildSchemas(Type) {
       color: Type.Optional(Type.String()),
       fill: Type.Optional(Type.String()),
     }),
-    Type.Object({
+    Closed({
       type: Type.Literal("line"),
       ...Style,
       points: Type.Array(PointSchema, { minItems: 2 }),
       color: Type.Optional(Type.String()),
       width: Type.Optional(Type.Number()),
     }),
-    Type.Object({
+    Closed({
       type: Type.Literal("arrow"),
       ...Style,
       points: Type.Array(PointSchema, { minItems: 2, maxItems: 4, description: "Last segment gets the head" }),
       color: Type.Optional(Type.String()),
       width: Type.Optional(Type.Number()),
     }),
-    Type.Object({
+    Closed({
       type: Type.Literal("text"),
-      ...Style,
+      ...TextStyle,
       text: Type.String(),
       x: Type.Number(),
       y: Type.Number({ description: "Baseline" }),
@@ -492,21 +491,21 @@ export function buildSchemas(Type) {
   ]);
 
   const ItemOpSchema = Type.Union([
-    Type.Object({
+    Closed({
       op: Type.Literal("update"),
       id: Type.String(),
       fields: Type.Record(Type.String(), Type.Unknown(), { description: "Fields to set; type is fixed" }),
     }),
-    Type.Object({
+    Closed({
       op: Type.Literal("move"),
       id: Type.String(),
       dx: Type.Number(),
       dy: Type.Number(),
     }),
-    Type.Object({ op: Type.Literal("delete"), id: Type.String() }),
+    Closed({ op: Type.Literal("delete"), id: Type.String() }),
   ]);
 
-  const BoardUpdateSchema = Type.Object({
+  const BoardUpdateSchema = Closed({
     baseRevision: Type.Integer({ minimum: 0 }),
     title: Type.Optional(Type.String()),
     clear: Type.Optional(
@@ -516,7 +515,7 @@ export function buildSchemas(Type) {
     chapters: Type.Optional(
       Type.Array(
         Type.Union([
-          Type.Object({
+          Closed({
             op: Type.Literal("add"),
             id: Type.String(),
             title: Type.String(),
@@ -526,15 +525,15 @@ export function buildSchemas(Type) {
             h: Type.Optional(Type.Number()),
             frame: Type.Optional(Type.Boolean()),
           }),
-          Type.Object({ op: Type.Literal("update"), id: Type.String(), title: Type.Optional(Type.String()), x: Type.Optional(Type.Number()), y: Type.Optional(Type.Number()), w: Type.Optional(Type.Number()), h: Type.Optional(Type.Number()), frame: Type.Optional(Type.Boolean()) }),
-          Type.Object({ op: Type.Literal("delete"), id: Type.String(), keepItems: Type.Optional(Type.Boolean({ description: "Else its items are erased" })) }),
+          Closed({ op: Type.Literal("update"), id: Type.String(), title: Type.Optional(Type.String()), x: Type.Optional(Type.Number()), y: Type.Optional(Type.Number()), w: Type.Optional(Type.Number()), h: Type.Optional(Type.Number()), frame: Type.Optional(Type.Boolean()) }),
+          Closed({ op: Type.Literal("delete"), id: Type.String(), keepItems: Type.Optional(Type.Boolean({ description: "Else its items are erased" })) }),
         ]),
       ),
     ),
     camera: Type.Optional(
       Type.Union([
-        Type.Object({ chapter: Type.String() }),
-        Type.Object({ x: Type.Number(), y: Type.Number(), w: Type.Number(), h: Type.Number() }),
+        Closed({ chapter: Type.String() }),
+        Closed({ x: Type.Number(), y: Type.Number(), w: Type.Number(), h: Type.Number() }),
         Type.Null(),
       ], { description: "{chapter}, a board rect, or null = home" }),
     ),
@@ -543,14 +542,11 @@ export function buildSchemas(Type) {
     ),
     check: Type.Optional(Type.Boolean()),
     scene: Type.Optional(
-      Type.Object({
+      Closed({
         mode: Type.Union([Type.Literal("append"), Type.Literal("replace")], {
           description: "replace swaps the whole scene",
         }),
         shapes: Type.Optional(Type.Array(ShapeSchema, { maxItems: 2000 })),
-        elements: Type.Optional(
-          Type.Array(Type.Record(Type.String(), Type.Unknown()), { maxItems: 2000, description: "Legacy; old saves only" }),
-        ),
         artifacts: Type.Optional(
           Type.Array(Type.Record(Type.String(), Type.Unknown()), {
             maxItems: 100,
@@ -624,9 +620,10 @@ export function buildSchemas(Type) {
  */
 export function summarizeBoard(board, focus) {
   const chapters = board?.chapters ?? [];
+  const legacy = legacyEquationPositions(board?.equations);
   const all = [
     ...(board?.scene?.artifacts ?? []).map((it) => ({ ...it, _kind: "artifact" })),
-    ...(board?.equations ?? []).map((it, i) => ({ ...it, _kind: "equation", _index: i })),
+    ...(board?.equations ?? []).map((it) => ({ ...it, _kind: "equation", _at: legacy.get(it) ?? [it.x, it.y] })),
     ...(board?.scene?.shapes ?? []).map((it) => ({ ...it, _kind: "shape" })),
   ];
   const camChapter = board?.camera?.chapter;
@@ -643,7 +640,7 @@ export function summarizeBoard(board, focus) {
   }
   const cam = board?.camera;
   if (board?.lastStep) lines.push(`steps: ${board.lastStep} (the next board_update adds step ${board.lastStep + 1})`);
-  lines.push(`camera: ${cam ? (cam.chapter ? `chapter ${cam.chapter}` : `rect ${Math.round(cam.x)},${Math.round(cam.y)} ${Math.round(cam.w)}x${Math.round(cam.h)}`) : "home (0,0 1200x800)"}`);
+  lines.push(`camera: ${cam ? (cam.chapter ? `chapter ${cam.chapter}` : `rect ${Math.round(cam.x)},${Math.round(cam.y)} ${Math.round(cam.w)}x${Math.round(cam.h)}`) : `home (0,0 ${CHAPTER.w}x${CHAPTER.h})`}`);
   const shown = f === "all" ? all : all.filter((it) => (it.chapter ?? null) === (f === "free" ? null : f));
   const r = (n) => (typeof n === "number" ? Math.round(n) : "?");
   const items = [];
@@ -652,7 +649,7 @@ export function summarizeBoard(board, focus) {
     if (it._kind === "artifact")
       items.push(`  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.width)}x${r(it.height)}${it.label ? ` "${it.label}"` : ""}${it.source ? ` (${it.source.length} chars)` : ""}${where}`);
     else if (it._kind === "equation")
-      items.push(`  [${it.id}] equation at (${r(it.x ?? 88)},${r(it.y ?? 92 + it._index * 115)}) ${it.label ? `${it.label}: ` : ""}${String(it.latex).slice(0, 80)}${where}`);
+      items.push(`  [${it.id}] equation at (${r(it._at[0])},${r(it._at[1])}) ${it.label ? `${it.label}: ` : ""}${String(it.latex).slice(0, 80)}${where}`);
     else if (it.points?.length) {
       const xs = it.points.map((p) => p[0]), ys = it.points.map((p) => p[1]);
       items.push(`  [${it.id}] ${it.type} bbox (${r(Math.min(...xs))},${r(Math.min(...ys))})-(${r(Math.max(...xs))},${r(Math.max(...ys))})${where}`);
@@ -675,26 +672,79 @@ export function summarizeBoard(board, focus) {
 
 /**
  * Browsers showing the board. The headless snapshot page (board_update's layout check,
- * board_snapshot) is an SSE client too, but nobody watches it, so it does not count.
+ * board_snapshot) is an SSE client too, but nobody watches it, so the server does not count it.
  */
 export function viewerCount(s) {
-  const page = s.snapshots?.page;
-  const headless = page && !page.isClosed?.() ? 1 : 0;
-  return Math.max(0, (s.clients?.size ?? 0) - headless);
+  if (typeof s?.viewerCount === "function") return s.viewerCount();
+  let n = 0;
+  for (const res of s?.clients ?? []) if (!res?.snapshot) n++;
+  return n;
 }
 
-/** board_open's result text. */
-export function openText({ url, opened, viewed, activationError, staleWarning = "" }) {
-  const shown = opened ? "opened in the learner's browser" : viewed ? "already open in a browser" : "not opened automatically; give the learner this URL";
+/**
+ * board_open's result text. The URL carries the session token, so it goes into the model's
+ * context only when the learner needs it: when no browser was opened and none shows the board.
+ */
+export function openText({ url, port, opened, viewed, activationError, staleWarning = "", notices = [] }) {
+  const where = port ? `127.0.0.1:${port}` : "the board";
+  const shown = opened
+    ? `The board is open in the learner's browser (${where}).`
+    : viewed
+      ? `The board is already open in a browser (${where}).`
+      : `Board: ${url} (not opened automatically; give the learner this URL).`;
   return [
     staleWarning,
-    `Blackboard: ${url} (${shown}).`,
+    ...notices,
+    shown,
     activationError
       ? `Could not activate the board tools: ${activationError}`
       : "Board tools are active. Call board_docs (topic) for formats before using an artifact type the first time.",
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+/** The last line of read and update results when nobody is watching. */
+function viewerLine(ctx, s) {
+  return viewerCount(s) === 0 ? `No browser is showing the board; call ${ctx.openHint}.` : "";
+}
+
+/** Snapshot-related notes (the headless browser running without its sandbox). */
+function snapshotNotes(s) {
+  return s.snapshots?.sandboxNote ? [`Note: ${s.snapshots.sandboxNote}`] : [];
+}
+
+/** True when a lint issue names one of the ids (as a whole word). */
+function mentions(issue, ids) {
+  for (const id of ids) {
+    let at = issue.indexOf(id);
+    while (at !== -1) {
+      const before = issue[at - 1], after = issue[at + id.length];
+      if ((before === undefined || /[\s"/(]/.test(before)) && (after === undefined || /[\s"/),:]/.test(after))) return true;
+      at = issue.indexOf(id, at + 1);
+    }
+  }
+  return false;
+}
+
+const MAX_LISTED_WARNINGS = 25;
+
+/**
+ * The layout part of an update result: warnings about what this update added or changed first
+ * (newest problems never fall off), then a count of the older ones elsewhere on the board.
+ */
+export function updateWarnings(serverWarnings, lintIssues, touched) {
+  const ids = [...new Set(touched)].filter(Boolean).sort((a, b) => b.length - a.length);
+  const mine = [...serverWarnings, ...lintIssues.filter((i) => mentions(i, ids))];
+  const older = lintIssues.filter((i) => !mentions(i, ids));
+  if (!mine.length && !older.length) return "layout check: no overlaps or off-board items.";
+  const lines = [];
+  if (mine.length) {
+    lines.push(`layout warnings (${mine.length}):`, ...mine.slice(0, MAX_LISTED_WARNINGS).map((i) => `  - ${i}`));
+    if (mine.length > MAX_LISTED_WARNINGS) lines.push(`  ... ${mine.length - MAX_LISTED_WARNINGS} more from this update`);
+  } else lines.push("layout check: no problems with what this update changed.");
+  if (older.length) lines.push(`+${older.length} older warning${older.length === 1 ? "" : "s"} on items this update did not touch (board_snapshot lists them all).`);
+  return lines.join("\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -706,6 +756,11 @@ export const handlers = Object.freeze({
   async board_read(ctx, params) {
     const s = await ctx.server();
     const board = s.getState();
+    const focus = params.chapter;
+    if (focus !== undefined && focus !== "all" && focus !== "free" && !(board.chapters ?? []).some((c) => c.id === focus)) {
+      const ids = (board.chapters ?? []).map((c) => c.id);
+      throw new Error(`unknown chapter "${String(focus).slice(0, 64)}"; ${ids.length ? `chapters: ${ids.join(", ")}` : "the board has no chapters"} (or "all", "free")`);
+    }
     const sceneDetail = params.includeScene
       ? JSON.stringify(
           {
@@ -722,16 +777,15 @@ export const handlers = Object.freeze({
       : undefined;
     const text = [
       ctx.staleWarning(),
-      `Pi blackboard running on 127.0.0.1:${s.port}. ${ctx.openHint} gives the authenticated browser URL.`,
-      s.restoredFrom ? `(board restored from autosave of ${s.restoredFrom})` : "",
-      summarizeBoard(board, params.chapter),
+      ...s.notices(),
+      `The board is running on 127.0.0.1:${s.port}.${s.restoredFrom ? ` (Restored from the autosave of ${s.restoredFrom}.)` : ""}`,
+      summarizeBoard(board, focus),
       `revision: ${s.revision}`,
       sceneDetail
         ? `scene detail:\n${sceneDetail.length > 24000 ? sceneDetail.slice(0, 24000) + "\n[Truncated. Use board_save then read the saved JSON for the complete scene.]" : sceneDetail}`
         : "",
-      board.equations.length + board.scene.shapes.length + (board.scene.artifacts?.length ?? 0) === 0
-        ? "The board is empty."
-        : "",
+      board.equations.length + board.scene.shapes.length + (board.scene.artifacts?.length ?? 0) === 0 ? "The board is empty." : "",
+      viewerLine(ctx, s),
     ]
       .filter(Boolean)
       .join("\n");
@@ -743,73 +797,60 @@ export const handlers = Object.freeze({
 
   async board_update(ctx, params) {
     const s = await ctx.server();
-    // Re-validate through the shared sanitizer so tool input follows the
-    // same rules as browser input (ids assigned, bounds enforced).
-    const update = {};
-    if (params.title !== undefined)
-      update.title = String(params.title).slice(0, 200);
-    if (params.clear !== undefined) update.clear = params.clear;
-    if (params.equations !== undefined) update.equations = params.equations;
-    if (params.chapters !== undefined) update.chapters = params.chapters;
-    if (params.camera !== undefined) update.camera = params.camera;
-    if (params.items !== undefined)
-      update.items = params.items.map((op) =>
-        op.op === "update" ? { ...(op.fields ?? {}), op: "update", id: op.id } : op,
-      );
-    if (params.scene !== undefined) {
-      update.scene = {
-        mode: params.scene.mode === "replace" ? "replace" : "append",
-        shapes: (params.scene.shapes ?? [])
-          .map((sh) => sanitizeShape(sh))
-          .filter(Boolean),
-        elements: params.scene.elements ?? [],
-        artifacts: params.scene.artifacts ?? [],
-      };
-    }
+    // Everything except the tool's own fields goes to the server unchanged: it validates every
+    // field and rejects what it cannot use with the reason, so nothing is dropped silently.
+    const { baseRevision, check, ...update } = params;
+    let result;
+    const before = s.revision;
     try {
-      const before = s.revision;
-      const revision = s.update({
-        baseRevision: params.baseRevision,
-        ...update,
-      });
+      result = s.apply({ baseRevision, ...update });
+    } catch (err) {
+      const conflict = err?.conflict;
+      if (!conflict) throw err;
       const board = s.getState();
-      let check = "";
-      if (params.check !== false) {
-        try {
-          const lint = await s.snapshots.lint({ timeout: 8000 });
-          check = lint.issues.length
-            ? `layout warnings (${lint.issues.length}):\n${lint.issues.slice(0, 25).map((i) => `  - ${i}`).join("\n")}`
-            : "layout check: no overlaps or off-board items.";
-        } catch (e) {
-          check = `layout check unavailable: ${String(e.message).split("\n")[0]}`;
-        }
-      }
       return {
         content: [
           {
             type: "text",
-            text: [ctx.staleWarning(), `Board updated to revision ${revision} (was ${before}).`, check, summarizeBoard(board)].filter(Boolean).join("\n"),
+            text: `Conflict: ${String(err.message)}\nCall board_read again, then re-apply your changes against revision ${conflict.currentRevision}. Current state:\n${summarizeBoard(board)}`,
           },
         ],
-        details: { revision, board },
+        isError: true,
+        details: { revision: conflict.currentRevision, board },
       };
-    } catch (err) {
-      const conflict = err?.conflict;
-      if (conflict) {
-        const board = s.getState();
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Conflict: ${String(err.message)}\nCall board_read again, then re-apply your changes against revision ${conflict.currentRevision}. Current state:\n${summarizeBoard(board)}`,
-            },
-          ],
-          isError: true,
-          details: { revision: conflict.currentRevision, board },
-        };
-      }
-      throw err;
     }
+    const { revision, warnings, touched } = result;
+    // Write the autosave now, so a failure is reported with this update.
+    await s.flushAutosave().catch(() => {});
+    let layout = warnings.length ? updateWarnings(warnings, [], touched) : "";
+    if (check !== false) {
+      try {
+        const lint = await s.snapshots.lint({ signal: ctx.signal });
+        layout = updateWarnings(warnings, lint.issues, touched);
+      } catch (e) {
+        layout = [layout, e?.name === "AbortError" ? "layout check cancelled." : `layout check unavailable: ${String(e.message).split("\n")[0]}`].filter(Boolean).join("\n");
+      }
+    }
+    const board = s.getState();
+    return {
+      content: [
+        {
+          type: "text",
+          text: [
+            ctx.staleWarning(),
+            ...s.notices({ once: true }),
+            `Board updated to revision ${revision} (was ${before}).`,
+            layout,
+            ...snapshotNotes(s),
+            summarizeBoard(board),
+            viewerLine(ctx, s),
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        },
+      ],
+      details: { revision, board },
+    };
   },
 
   async board_snapshot(ctx, params) {
@@ -824,13 +865,14 @@ export const handlers = Object.freeze({
     // Region helpers are shared with /board export, so its PNGs match these snapshots.
     if (!region && params.overview && board.chapters?.length) region = overviewRegion(board.chapters);
     region ??= cameraRect(board);
-    const shot = await s.snapshots.capture({ region, width: params.width });
+    const shot = await s.snapshots.capture({ region, width: params.width, signal: ctx.signal });
     const { items, issues } = shot.lint;
     const text = [
       ctx.staleWarning(),
       `Snapshot of revision ${s.revision} (board region ${Math.round(region.x)},${Math.round(region.y)} ${Math.round(region.w)}x${Math.round(region.h)}). Measured boxes are in board coordinates; a chapter item's local coords = board coords minus the chapter origin.`,
-      issues.length ? `layout warnings (${issues.length}):\n${issues.slice(0, 40).map((i) => `  - ${i}`).join("\n")}` : "layout check: no overlaps or off-board items.",
+      issues.length ? `layout warnings (${issues.length}):\n${issues.slice(0, 40).map((i) => `  - ${i}`).join("\n")}${issues.length > 40 ? `\n  ... ${issues.length - 40} more` : ""}` : "layout check: no overlaps or off-board items.",
       items.length ? `measured boxes:\n${items.slice(0, 120).map((i) => `  [${i.id}] ${i.kind} ${i.x},${i.y} ${i.w}x${i.h}`).join("\n")}` : "board is empty.",
+      ...snapshotNotes(s),
     ].filter(Boolean).join("\n");
     return {
       content: [
@@ -847,7 +889,7 @@ export const handlers = Object.freeze({
       for (const i of iconIndex().values()) counts.set(i.category, (counts.get(i.category) ?? 0) + 1);
       const text = counts.size
         ? `Icon categories (${iconIndex().size} icons):\n` + [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([c, n]) => `  ${c} (${n})`).join("\n")
-        : "The icon library is not built. Run: node scripts/build-icons.mjs";
+        : `The icon library is missing from this install (public/icons/index.json). Reinstall the package, or build it in a checkout of ${REPO_URL} with npm run build:icons.`;
       return { content: [{ type: "text", text }], details: {} };
     }
     const hits = searchIcons(params.query ?? "", { category: params.category, limit: params.limit ?? 25 });
@@ -862,14 +904,7 @@ export const handlers = Object.freeze({
     if (params.action === "list") {
       const saves = await s.listSaves();
       return {
-        content: [
-          {
-            type: "text",
-            text: saves.length
-              ? `Saved boards: ${saves.join(", ")}`
-              : "No saved boards yet.",
-          },
-        ],
+        content: [{ type: "text", text: saves.length ? `Saved boards: ${saves.join(", ")}` : "No saved boards yet." }],
         details: { saves },
       };
     }
@@ -885,20 +920,18 @@ export const handlers = Object.freeze({
         details: { name: saved.name, savedAt: saved.savedAt },
       };
     }
-    if (params.baseRevision === undefined)
-      throw new Error(
-        "Loading replaces the board. Read it first, then supply baseRevision.",
-      );
-    await s.load(params.name ?? "default", params.baseRevision);
-    const revision = s.revision;
+    if (params.baseRevision === undefined) throw new Error("Loading replaces the board. Read it first, then supply baseRevision.");
+    const { revision, skipped } = await s.load(params.name ?? "default", params.baseRevision);
     return {
       content: [
         {
           type: "text",
-          text: `Loaded board "${params.name ?? "default"}" at revision ${revision}.\n${summarizeBoard(s.getState())}`,
+          text: [`Loaded board "${params.name ?? "default"}" at revision ${revision}.`, skipped ? `The save had things this board cannot use: ${skipped}.` : "", summarizeBoard(s.getState()), viewerLine(ctx, s)]
+            .filter(Boolean)
+            .join("\n"),
         },
       ],
-      details: { revision, board: s.getState() },
+      details: { revision, board: s.getState(), skipped },
     };
   },
 

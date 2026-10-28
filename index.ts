@@ -1,15 +1,16 @@
 /**
- * Pi Math Board — a quiet, spatial SVG blackboard beside the Pi terminal.
+ * math-board for pi: a quiet, spatial SVG blackboard beside the pi terminal.
  *
- * `/board` opens a full-window surface where diagrams and locally rendered
- * KaTeX equations share one coordinate system. Browser rendering is view-only;
- * Pi model tools update the board and named snapshots preserve lesson stages.
+ * `/board` opens a full-window page where diagrams and locally rendered KaTeX
+ * equations share one coordinate system. The page is view-only (the learner
+ * cannot draw; its Clear and Save buttons are the only writes); the model's
+ * tools update the board and named snapshots preserve lesson stages.
  *
- * Both the browser and the model share one board state with a monotonic
- * `revision`. Every mutation carries the revision it was based on; stale
- * mutations are rejected with a conflict (409 over HTTP, isError over tools)
- * so stale writes cannot silently overwrite edits. SSE updates the browser;
- * the model observes browser edits through board_read (not unsolicited turns).
+ * The page and the model share one board state with a monotonic `revision`.
+ * Every mutation carries the revision it was based on; stale mutations are
+ * rejected with a conflict (409 over HTTP, isError over tools), so a stale
+ * write never overwrites a newer board. SSE updates the browser; the model
+ * sees a Clear or a load through board_read (never as an unsolicited turn).
  *
  * The tools themselves (schemas, descriptions, handlers, board_docs text and
  * the board_teaching text) live in tools.mjs, shared with the MCP server
@@ -22,9 +23,10 @@
  * registered with `deferred` exposure; `board_open` and `/board` activate them
  * with pi.setActiveTools. Long-form reference (artifact formats, SVG rules,
  * plot grammar, animation, chapters, layout, saves) lives in `board_docs`
- * instead of the tool schemas. In the learning folder (~/Learn or
- * $PI_LEARN_DIR, outside subagents) a constant `board_teaching` system prompt
- * section tells the tutor when and how to use the board.
+ * instead of the tool schemas. A constant `board_teaching` system prompt
+ * section tells the tutor when and how to use the board: by default inside
+ * the learning folder (~/Learn, or $MATH_BOARD_LEARN_DIR) and not in
+ * subagents; MATH_BOARD_TEACHING=always|never overrides that.
  *
  * Lifecycle & safety:
  *   - Nothing starts at extension load time. The server starts lazily on the
@@ -33,8 +35,9 @@
  *     validates the Host header (loopback only) and any Origin header.
  *   - Request bodies and scenes are bounded and re-validated. Equations use
  *     KaTeX with trust:false and expansion limits; labels use textContent.
- *   - Saves persist as JSON under the package's own .data/ directory, or under
- *     $PI_MATH_BOARD_DATA_DIR when set (tests always set it).
+ *   - Saves persist as JSON in the data folder: $MATH_BOARD_DATA_DIR when set
+ *     (tests always set it), else .data/ in a checkout, else a per-user folder
+ *     (see defaultDataDir in server.mjs).
  *   - `/board export [name]` (export.mjs) writes the running board to
  *     <cwd>/viz/ only when the user types it: never on shutdown, autosave or
  *     from a model tool, and it never starts a board server.
@@ -42,22 +45,45 @@
 
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { nativeImport } from "./native-import.mjs";
+// Types only: the runtime module is imported below through a version-stamped URL.
+import type { BoardServer } from "./server.mjs";
 
 /* ------------------------------------------------------------------ */
 /* Learning folder: teaching guidance in the system prompt             */
 /* ------------------------------------------------------------------ */
 
-// The learning folder is ~/Learn, or $PI_LEARN_DIR.
-const LEARN_DIR = path.resolve(process.env.PI_LEARN_DIR ?? path.join(homedir(), "Learn"));
+/** A path and, when it exists, its real path (pi resolves session folders through symlinks). */
+function forms(dir: string): string[] {
+  const resolved = path.resolve(dir);
+  try {
+    return [...new Set([resolved, realpathSync(resolved)])];
+  } catch {
+    return [resolved];
+  }
+}
+
+// The learning folder: $MATH_BOARD_LEARN_DIR (or its older name $PI_LEARN_DIR), else ~/Learn.
+const LEARN_DIRS = forms(process.env.MATH_BOARD_LEARN_DIR ?? process.env.PI_LEARN_DIR ?? path.join(homedir(), "Learn"));
 
 function isLearningFolder(cwd: string): boolean {
-  const dir = path.resolve(cwd);
-  return dir === LEARN_DIR || dir.startsWith(LEARN_DIR + path.sep);
+  return forms(cwd).some((dir) => LEARN_DIRS.some((learn) => dir === learn || dir.startsWith(learn + path.sep)));
+}
+
+/**
+ * Whether this run gets the board_teaching section. MATH_BOARD_TEACHING=always or never decides;
+ * auto (the default) means inside the learning folder and not in a subagent (PI_SUBAGENT_NAME,
+ * set by subagent extensions).
+ */
+function teachingWanted(cwd: string): boolean {
+  const mode = (process.env.MATH_BOARD_TEACHING ?? "auto").trim().toLowerCase();
+  if (mode === "always") return true;
+  if (mode === "never") return false;
+  return !process.env.PI_SUBAGENT_NAME && isLearningFolder(cwd);
 }
 // The section's text is BOARD_TEACHING in tools.mjs, which is also the MCP server's instructions.
 
@@ -69,8 +95,9 @@ function isLearningFolder(cwd: string): boolean {
  * their siblings, so they must all be imported with one stamp: see loadSourceModules).
  */
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-// index.ts is included so the server's stale-source check is re-baselined on every reload.
-const SERVER_FILES = ["server.mjs", "scene.mjs", "snapshot.mjs", "shared/expr.mjs", "export.mjs", "tools.mjs", "index.ts"];
+// The same list as SOURCE_FILES in server.mjs (index.ts included, so the server's stale-source
+// check is re-baselined on every reload); scripts/verify-import.mjs checks that they match.
+const SERVER_FILES = ["server.mjs", "snapshot.mjs", "export.mjs", "tools.mjs", "shared/expr.mjs", "shared/svg.mjs", "index.ts"];
 /** Import these modules under one version stamp, so tools.mjs gets the same server.mjs instance as this file. */
 function loadSourceModules(files: string[]): Promise<any[]> {
   const stamp = Math.max(
@@ -87,7 +114,7 @@ function loadSourceModules(files: string[]): Promise<any[]> {
 
 export default async function mathBoardExtension(pi: ExtensionAPI) {
   const [
-    { BoardServer, defaultDataDir, openBrowser },
+    { BoardServer: BoardServerClass, defaultDataDir, openBrowser },
     { exportLesson, exportNotice },
     { TOOLS, buildSchemas, handlers, openText, viewerCount, staleFiles, BOARD_TEACHING },
   ] = await loadSourceModules(["server.mjs", "export.mjs", "tools.mjs"]);
@@ -96,7 +123,7 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
   function staleWarning(): string {
     const stale = staleFiles();
     return stale.length
-      ? `WARNING: ${stale.join(", ")} changed on disk after the board server loaded. Ask the user to run /reload or restart pi; new features may be silently missing.`
+      ? `WARNING: ${stale.join(", ")} changed on disk after the board server loaded. Ask the user to run /reload or restart pi; new features may be missing.`
       : "";
   }
 
@@ -104,10 +131,7 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
   let server: BoardServer | null = null;
 
   async function ensureServer(title?: string): Promise<BoardServer> {
-    if (!server) {
-      server = new BoardServer({ dataDir: defaultDataDir(), title });
-    }
-    const s = server;
+    const s: BoardServer = (server ??= new BoardServerClass({ dataDir: defaultDataDir("pi"), title }));
     try {
       await s.start();
     } catch (error) {
@@ -138,6 +162,7 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
   const meta = (name: string): any => TOOLS.find((t: any) => t.name === name);
   /** What the shared handlers need from pi: the lazy server, the stale-source warning, how to get the URL. */
   const toolContext = { server: () => ensureServer(), staleWarning, openHint: "board_open (or /board open)" };
+  const noBrowser = () => process.env.MATH_BOARD_NO_BROWSER === "1";
 
   /** A board tool with the shared handler; `deferred`, so inactive until board_open or /board activates it. */
   const boardTool = (name: string) => {
@@ -149,7 +174,8 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
       exposure: "deferred",
       description,
       parameters: schemas[name],
-      execute: (_toolCallId, params) => handlers[name](toolContext, params),
+      // The abort signal lets pi cancel a running layout check or snapshot.
+      execute: (_toolCallId, params, signal) => handlers[name]({ ...toolContext, signal }, params),
     });
   };
 
@@ -178,14 +204,15 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
 
   /**
    * The one code path behind `/board open` and board_open: start the server (shared, lazy),
-   * activate the board tools, and open the browser in the TUI only. With `unlessViewed`, a
-   * board that a browser already shows is not opened again.
+   * activate the board tools, and open the browser in the TUI only (never with
+   * MATH_BOARD_NO_BROWSER=1). With `unlessViewed`, a board that a browser already shows is not
+   * opened again.
    */
   async function openBoard(ctx: ExtensionContext, { unlessViewed = false } = {}) {
     const s = await ensureServer();
     const activationError = activateBoardTools();
     const viewed = unlessViewed && viewerCount(s) > 0;
-    const opened = ctx.mode === "tui" && !viewed ? await openBrowser(s.url) : false;
+    const opened = ctx.mode === "tui" && !viewed && !noBrowser() ? await openBrowser(s.url) : false;
     ctx.ui.setStatus("math-board", `⬛ 127.0.0.1:${s.port}`);
     return { s, opened, viewed, activationError };
   }
@@ -199,7 +226,8 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
     parameters: schemas.board_open,
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const { s, opened, viewed, activationError } = await openBoard(ctx, { unlessViewed: true });
-      const text = openText({ url: s.url, opened, viewed, activationError, staleWarning: staleWarning() });
+      // The URL (with its token) reaches the model only when no browser shows the board.
+      const text = openText({ url: s.url, port: s.port, opened, viewed, activationError, staleWarning: staleWarning(), notices: s.notices() });
       return { content: [{ type: "text", text }], details: { port: s.port, opened, activated: !activationError } };
     },
   });
@@ -213,7 +241,7 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
       "Usage: /board [action]",
       "  /board open       open the board in your browser and turn on the board tools (also /board)",
       "  /board clear      clear board (add: equations, scene)",
-      "  /board save [n]   persist board to disk (name, default 'default')",
+      "  /board save [n]   persist board to disk (name, default 'default'; words are joined with -)",
       "  /board load [n]   load a saved board",
       "  /board export [n] write the lesson to ./viz/board-<n>-<time>/: board.json, a PNG per chapter, lesson.md",
       "  /board status     show server status",
@@ -240,7 +268,8 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
     },
     handler: async (args, ctx) => {
       const [verb, ...rest] = args.trim().split(/\s+/).filter(Boolean);
-      const nameArg = rest[0];
+      // `/board save my lesson` saves "my-lesson": a save name is one word.
+      const nameArg = rest.length ? rest.join("-") : undefined;
       // `/board export Newton's laws` names the export with every word after the verb.
       const exportName = rest.join(" ");
 
@@ -264,7 +293,7 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
                 "No board running — nothing to clear.",
                 "info",
               );
-            server.clear(nameArg ? [nameArg] : ["all"]);
+            server.clear(rest[0] ? [rest[0]] : ["all"]);
             ctx.ui.notify(`Board cleared (rev ${server.revision}).`, "info");
             return;
           }
@@ -282,13 +311,13 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
             const s = await ensureServer();
             // Compare-and-swap against the revision seen now: an edit that lands
             // while the save file is read makes the load fail instead of clobbering it.
-            await s.load(nameArg ?? "default", s.revision);
+            const { skipped } = await s.load(nameArg ?? "default", s.revision);
             const activationError = activateBoardTools(); // the model can read and continue the loaded lesson
             if (activationError)
               ctx.ui.notify(`Board tools not activated: ${activationError}`, "warning");
             ctx.ui.notify(
-              `Loaded "${nameArg ?? "default"}" (rev ${s.revision}). Use /board open to view.`,
-              "info",
+              `Loaded "${nameArg ?? "default"}" (rev ${s.revision}). Use /board open to view.${skipped ? `\n  The save had things this board cannot use: ${skipped}.` : ""}`,
+              skipped ? "warning" : "info",
             );
             return;
           }
@@ -330,9 +359,15 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
               );
               return;
             }
+            const notices = server.notices();
             ctx.ui.notify(
-              `Board server: running at 127.0.0.1:${server.port} (rev ${server.revision}, started ${server.startedAt}${server.restoredFrom ? `, restored autosave from ${server.restoredFrom}` : ""}, ${server.getState().chapters?.length ?? 0} chapters)\n${server.url}`,
-              "info",
+              [
+                `Board server: running at 127.0.0.1:${server.port} (rev ${server.revision}, started ${server.startedAt}${server.restoredFrom ? `, restored autosave from ${server.restoredFrom}` : ""}, ${server.getState().chapters?.length ?? 0} chapters, ${viewerCount(server)} browser${viewerCount(server) === 1 ? "" : "s"} watching)`,
+                `  data folder: ${server.dataDir}`,
+                ...notices.map((n: string) => `  ${n}`),
+                server.url,
+              ].join("\n"),
+              notices.length ? "warning" : "info",
             );
             return;
           }
@@ -362,10 +397,11 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
   // inactive (not declared to the model) until board_open or /board activates them.
   for (const { name } of TOOLS) pi.registerTool(name === "board_open" ? boardOpenTool : boardTool(name));
 
-  // Inside the learning folder (and not in a subagent), tell the tutor when and how to use
-  // the board. Outside it, add nothing. The text is constant, so the cached prompt holds.
+  // Inside the learning folder (and not in a subagent), or wherever MATH_BOARD_TEACHING=always,
+  // tell the tutor when and how to use the board. Otherwise add nothing. The text is constant,
+  // so the cached prompt holds.
   pi.on("before_agent_start", (event, ctx) => {
-    if (process.env.PI_SUBAGENT_NAME || !isLearningFolder(ctx.cwd)) return;
+    if (!teachingWanted(ctx.cwd)) return;
     event.systemPromptOptions.sections.board_teaching = BOARD_TEACHING;
   });
 
