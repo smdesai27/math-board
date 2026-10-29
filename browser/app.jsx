@@ -626,9 +626,12 @@ function snapParam(p, v) {
   if (p.step) out = Math.min(p.max, p.min + Math.round((out - p.min) / p.step) * p.step);
   return out;
 }
+/** Decimal places of a number as written: 0.25 -> 2, 2.5 -> 1, 1e-7 -> 7. */
+const decimals = (v) => { const [m, e] = String(v).split("e"); return Math.max(0, (m.split(".")[1]?.length ?? 0) - Number(e ?? 0)); };
 function fmtParam(p, v) {
   const unit = p.step || (p.max - p.min) / 100;
-  const d = Math.max(0, Math.min(6, -Math.floor(Math.log10(unit) + 1e-9)));
+  // With a step every value is min + k * step, so show exactly the decimals those have.
+  const d = Math.min(6, p.step ? Math.max(decimals(p.step), decimals(p.min)) : Math.max(0, -Math.floor(Math.log10(unit) + 1e-9)));
   return (Math.abs(v) < unit / 1e6 ? 0 : v).toFixed(d).replace("-", "−");
 }
 /**

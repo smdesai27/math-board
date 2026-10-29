@@ -124,3 +124,15 @@ test("a plot without sliders draws exactly as before (no slider rows, no data-pa
   expect(await g.locator(".plot").getAttribute("data-params")).toBeNull();
   await expect(g.locator(".plot-drag")).toHaveCount(0);
 });
+
+test("slider values show the decimals their step has, in the label and the copied reference", async ({ page }) => {
+  const { params, track } = await fid(page, { ...FID, params: [
+    { name: "a", min: 0, max: 1, value: 0.25, step: 0.25 },
+    { name: "b", min: 0, max: 10, value: 7.5, step: 2.5 },
+    { name: "c", min: 0, max: 0.9, value: 0.45, step: 0.15 },
+  ], height: 600, functions: [{ expr: "a x + b + c" }], points: [], vlines: [] });
+  expect(await params()).toBe("a = 0.25, b = 7.5, c = 0.45");
+  await track(0).focus();
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(params).toBe("a = 0.50, b = 7.5, c = 0.45");
+});
