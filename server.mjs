@@ -949,7 +949,8 @@ function applyItemOps(board, ops, strict, touched) {
       const r = reader(op, where, strict);
       const dx = r.num("dx", 0), dy = r.num("dy", 0);
       next = clone(cur);
-      if (Array.isArray(next.points)) next.points = next.points.map(([x, y]) => [x + dx, y + dy]);
+      // Lines, arrows and strokes carry [x, y] pairs; a plot's points are data, in its own axes, and move with it.
+      if (kind === "shapes" && Array.isArray(next.points)) next.points = next.points.map(([x, y]) => [x + dx, y + dy]);
       else {
         // Stored boards always have x,y; an equation from an older state moves from where the page drew it.
         const [x0, y0] = kind === "equations" ? legacyEquationPositions(list).get(cur) ?? [cur.x, cur.y] : [cur.x, cur.y];

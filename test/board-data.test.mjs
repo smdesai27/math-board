@@ -339,3 +339,13 @@ test("plot sliders: params are checked, usable in expressions and coordinates, a
   assert.deepEqual(lenient.scene.artifacts[0].params, [{ name: "a", min: 0, max: 1, value: 0 }]);
   assert.match(summarizeBoard(applyUpdate(emptyBoard(), plot({ params: [{ name: "w", min: 0, max: 6, value: 3 }], functions: [{ expr: "sin(w x)" }] }))), /\[p\] plot at \(0,0\) 360x280 sliders: w=3 in \[0, 6\]/);
 });
+
+test("moving a plot moves its box, not its data points", () => {
+  let b = applyUpdate(emptyBoard(), { scene: { mode: "append", artifacts: [{ type: "plot", id: "p", x: 10, y: 20, functions: [{ expr: "x" }], points: [{ x: 1, y: 2, label: "A" }] }] } });
+  b = applyUpdate(b, { items: [{ op: "move", id: "p", dx: 5, dy: -5 }] });
+  const p = b.scene.artifacts[0];
+  assert.deepEqual([p.x, p.y, p.points], [15, 15, [{ x: 1, y: 2, label: "A" }]]);
+  b = applyUpdate(b, { scene: { mode: "append", shapes: [{ type: "line", id: "l", points: [[0, 0], [10, 10]] }] } });
+  b = applyUpdate(b, { items: [{ op: "move", id: "l", dx: 1, dy: 2 }] });
+  assert.deepEqual(b.scene.shapes[0].points, [[1, 2], [11, 12]]);
+});
