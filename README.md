@@ -157,8 +157,9 @@ Rendering defaults, set after building real lessons: Mermaid uses a chalk theme 
 | Whole lesson | `o` (Overview) |
 | Follow the tutor's camera again | `f`, double-click, `0` (Follow) |
 | Point the tutor at an item | hover shows `step n · id · chapter`; a click copies `step n, id (chapter c)` to paste into the terminal |
+| Save, Clear and the shortcut list | `?` (the ⋯ menu); `Esc` closes the bar |
 
-The controls and a `step n / N` indicator appear in the top-right on hover. Panning by hand pauses camera following until you press Follow.
+At the top sits one small pill with the lesson, the chapter, `step n / N` and a connection dot. Hover it (or tap it on a touch screen) and the controls open below it: steps and Replay, chapters, Overview and Follow, and ⋯ for Save, Clear and the shortcuts. It closes again when the pointer leaves. Panning by hand pauses camera following until you press Follow.
 
 ## Model tools
 
