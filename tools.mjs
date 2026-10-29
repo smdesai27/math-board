@@ -266,8 +266,8 @@ export const BOARD_DOCS = Object.freeze({
       "lil-gui (window.lil.GUI: slider panels), fft (window.FFT: fft.js), katex (window.katex, with \\ce; its CSS too).",
     "window.board: width, height, colors {chalk, muted, yellow, blue, red, green, purple, background}, font. The frame counts as ready just after load; " +
       "if it draws later, call board.wait() at the start and board.ready() once drawn.",
-    "The sandbox: nothing from the network (fetch, images, fonts and scripts from URLs are blocked), no access to the board page, cookies or storage, " +
-      "no forms, popups or navigation. Draw with canvas or SVG, or use data: URLs.",
+    "The sandbox blocks fetch, XHR, WebSockets, and scripts, images and fonts from URLs, and WebRTC is switched off; there is no access to the board page, " +
+      "cookies or storage, and no forms, popups or navigation. Draw with canvas or SVG, or use data: URLs.",
     "Checks: a new or changed html artifact is loaded first in the headless layout check, and the learner sees it only if it was ready there within 8 s. " +
       "Script errors (with the line in your source), blocked requests, navigation and a frame that never got ready are reported like a failed artifact: fix and resend.",
     "It draws above the board's other items and takes the pointer and wheel inside its box, so give it its own space. Snapshots and exports show it just after loading.",

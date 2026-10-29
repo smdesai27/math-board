@@ -84,13 +84,29 @@ export async function launchChromium(chromium) {
 }
 
 const abortError = () => Object.assign(new Error("cancelled"), { name: "AbortError" });
-/** `promise`, or a TimeoutError after `ms` (for page calls a busy page would never answer). */
-function withLimit(promise, ms) {
+// The error a page wait gets when a page with html frames stops answering within its time limit.
+export const FRAME_TIMEOUT = "FrameTimeout";
+/** `promise`, or an error named `name` after `ms` (for page calls a busy page would never answer). */
+function withLimit(promise, ms, name = "TimeoutError") {
   let timer;
   const limit = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(Object.assign(new Error(`Timeout ${ms}ms exceeded`), { name: "TimeoutError" })), ms);
+    timer = setTimeout(() => reject(Object.assign(new Error(`Timeout ${ms}ms exceeded`), { name })), ms);
   });
+  promise.catch?.(() => {});
   return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
+/**
+ * What a failed headless call says about the html frame it was checking: { failed: reason } (the
+ * frame stalled or crashed the page), { unchecked: true } (no headless browser to check with),
+ * { error, aborted? } (nothing about the frame: cancelled, or the browser was closed under it).
+ */
+export function frameVerdict(err, discarded = false) {
+  const message = String(err?.message ?? err);
+  if (err?.name === "AbortError") return { error: message, aborted: true };
+  if (/no headless browser/i.test(message)) return { unchecked: true };
+  if (err?.name === FRAME_TIMEOUT) return { failed: "in the headless check it was not ready within 8 s (an endless loop, a long computation, or board.wait() without board.ready()?)" };
+  if (!discarded && pageGone(err)) return { failed: "it crashed the headless check page (out of memory?)" };
+  return { error: message };
 }
 const pageGone = (err) => /Target crashed|crash|has been closed|Target closed|browser has disconnected|Page closed|context or browser has been closed/i.test(String(err?.message));
 
@@ -182,25 +198,25 @@ export class Snapshotter {
   /** Wait for the page to show the current revision, with its async rendering done (and `frame`, an html artifact being checked, loaded or failed). */
   async waitReady(page, timeout = 10000, frame = null) {
     const revision = this.server.revision;
-    const wait = page.waitForFunction(
-      ([rev, id]) => window.__board && window.__board.revision >= rev && window.__board.pending === 0 && (!id || window.__board.frameSettled?.(id)),
-      [revision, frame],
-      { timeout, polling: 50 },
-    );
-    if (!frame) await wait;
-    else {
-      // The frame to check may have been chosen after the page last read the board: read it now.
-      // Playwright's own time limit runs inside the page, which a frame stuck in a loop blocks, so
-      // the limit is enforced here too.
-      wait.catch(() => {});
-      await withLimit(page.evaluate(() => window.__board?.refresh?.()).then(() => wait), timeout);
-    }
-    await page.evaluate(async () => {
-      await document.fonts.ready;
-      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-    });
-    // Rendering may have started more async work (e.g. a decode); settle again.
-    await page.waitForFunction(() => window.__board.pending === 0, null, { timeout, polling: 50 });
+    const steps = async () => {
+      // The frame to check was chosen just now, maybe after the page last read the board.
+      if (frame) await page.evaluate(() => window.__board?.refresh?.());
+      await page.waitForFunction(
+        ([rev, id]) => window.__board && window.__board.revision >= rev && window.__board.pending === 0 && (!id || window.__board.frameSettled?.(id)),
+        [revision, frame],
+        { timeout, polling: 50 },
+      );
+      await page.evaluate(async () => {
+        await document.fonts.ready;
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      });
+      // Rendering may have started more async work (e.g. a decode); settle again.
+      await page.waitForFunction(() => window.__board.pending === 0, null, { timeout, polling: 50 });
+    };
+    // Playwright's time limits run inside the page, which an html frame stuck in a loop blocks,
+    // so with html frames on the page the limit is enforced here as well.
+    if (this.server.html) await withLimit(steps(), timeout, FRAME_TIMEOUT);
+    else await steps();
   }
 
   /**
@@ -256,35 +272,44 @@ export class Snapshotter {
 
   /** Measured layout issues for the whole board. */
   lint({ timeout = LINT_TIMEOUT_MS, signal } = {}) {
-    const checking = this.server.uncheckedFrames?.() ?? [];
-    const ready = checking.length ? FRAME_CHECK_READY_MS : Math.min(10000, timeout);
-    return this.checkFrames(checking, this.run(() => this._lint(ready, checking[0]?.id), { timeout, signal, label: "layout check" }), (r) => r.frames);
+    const work = (frame) => this._lint(frame ? FRAME_CHECK_READY_MS : Math.min(10000, timeout), frame);
+    return this.run(() => this.checking(work, (r) => r.frames), { timeout, signal, label: "layout check" });
   }
   capture({ region, width, timeout = CAPTURE_TIMEOUT_MS, signal } = {}) {
-    const checking = this.server.uncheckedFrames?.() ?? [];
-    const ready = checking.length ? FRAME_CHECK_READY_MS : undefined;
-    return this.checkFrames(checking, this.run(() => this._capture({ region, width, ready, frame: checking[0]?.id }), { timeout, signal, label: "snapshot" }), (r) => r.lint?.frames);
+    const work = (frame) => this._capture({ region, width, ready: frame ? FRAME_CHECK_READY_MS : undefined, frame });
+    return this.run(() => this.checking(work, (r) => r.lint?.frames), { timeout, signal, label: "snapshot" });
   }
   /**
-   * A call that loads html artifacts not checked yet is their check: the server learns which
-   * frames loaded (or that the page stopped responding: then the page is thrown away, so the
-   * next call starts clean and never loads that frame again).
+   * Page work that is also the check of the next unchecked html frame, if there is one. The frame
+   * is chosen here, inside the queue, so it is the one the page loads, and the server learns what
+   * the work showed about it. A frame that stalls or crashes the page is held back and the work
+   * runs once more without it, so the caller still gets its layout result. A page stuck in a frame
+   * is thrown away either way, so the next call starts clean.
    */
-  checkFrames(checking, call, framesOf) {
-    if (!checking.length) return call;
-    return call.then(
-      (result) => { this.server.frameChecked(checking, framesOf(result)); return result; },
-      (err) => {
-        if (/timed? ?out|Timeout \d+ms exceeded/i.test(String(err?.message))) this.discard();
-        this.server.frameChecked(checking, null, err);
+  async checking(work, framesOf) {
+    const list = this.server.startFrameCheck?.() ?? [];
+    const generation = this.generation;
+    let result;
+    try {
+      result = await work(list[0]?.id ?? null);
+    } catch (err) {
+      if (!list.length) {
+        if (err?.name === FRAME_TIMEOUT) this.discard();
         throw err;
-      },
-    );
+      }
+      const verdict = frameVerdict(err, generation !== this.generation);
+      this.server.frameChecked(list, verdict);
+      if (!verdict.failed) throw err;
+      this.discard();
+      return await work(null);
+    }
+    if (list.length) this.server.frameChecked(list, { states: framesOf(result) });
+    return result;
   }
 
   async _lint(readyTimeout, frame) {
     const page = await this.ensurePage();
-    await this.pauseFrames(page, false);
+    await this.pauseFrames(page, false, frame ? [frame] : []);
     try {
       await this.waitReady(page, readyTimeout, frame);
       return await page.evaluate((b) => window.__boardLint(b), { x: 0, y: 0, ...BOARD });
@@ -293,12 +318,13 @@ export class Snapshotter {
     }
   }
   /**
-   * Between calls the page keeps html artifacts' frames loaded but not rendered (display: none
-   * stops their animation loops), so an idle headless browser costs no CPU.
+   * html frames load in the page only during a call: a layout check loads just the frame it
+   * checks (`ids`), a snapshot loads all of them (`ids` null), and between calls none is loaded,
+   * so no model code runs (or stalls the page) while the headless browser waits.
    */
-  async pauseFrames(page, paused) {
+  async pauseFrames(page, paused, ids = null) {
     if (!this.server.html || page.isClosed?.()) return;
-    await withLimit(page.evaluate((p) => window.__board?.pauseFrames?.(p), paused), 2000).catch(() => {});
+    await withLimit(page.evaluate(([p, i]) => window.__board?.pauseFrames?.(p, i), [paused, ids]), 2000).catch(() => {});
   }
 
   /**
@@ -307,7 +333,7 @@ export class Snapshotter {
    */
   async _capture({ region, width, ready, frame } = {}) {
     const page = await this.ensurePage();
-    await this.pauseFrames(page, false);
+    await this.pauseFrames(page, false, null);
     await this.waitReady(page, ready, frame);
     const r = region ?? { x: 0, y: 0, ...BOARD };
     const w = Math.round(Math.max(200, Math.min(2400, width ?? BOARD.w)));

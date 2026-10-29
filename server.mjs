@@ -233,12 +233,15 @@ const FRAME_STYLE =
 function frameBridge(item, offset) {
   const colors = { chalk: "#e8e3d9", muted: "#8a8578", yellow: "#f2c14e", blue: "#5fb3d9", red: "#ef6f6c", green: "#8de0be", purple: "#c39bd3", background: "#000000" };
   return `(()=>{const OFFSET=${offset};let sent=false,manual=false,errors=0;` +
+    // CSP has no directive for WebRTC, which can reach the network (STUN/TURN). Removing the
+    // constructors stops the direct route; a nested frame could still find them (SECURITY.md).
+    `for(const k of ["RTCPeerConnection","webkitRTCPeerConnection","RTCDataChannel","RTCIceTransport","RTCRtpSender","RTCRtpReceiver"])try{Object.defineProperty(window,k,{value:undefined,configurable:false,writable:false})}catch(e){}` +
     `const post=(type,extra)=>{try{parent.postMessage(Object.assign({mathBoard:1,type},extra),"*")}catch(e){}};` +
     `const fail=(message,line)=>{if(++errors>5)return;post("error",{message:String(message).slice(0,300),line:line>OFFSET?line-OFFSET:undefined})};` +
     `addEventListener("error",(e)=>{const t=e.target;if(t&&t!==window&&(t.src||t.href)){fail("could not load "+String(t.src||t.href).split("/").pop());return}` +
     `fail(e.message&&e.message!=="Script error."?e.message:"a script error (this browser hides the details; the tutor's layout check shows them)",e.lineno)},true);` +
     `addEventListener("unhandledrejection",(e)=>fail("unhandled promise rejection: "+(e.reason&&e.reason.message||e.reason)));` +
-    `document.addEventListener("securitypolicyviolation",(e)=>fail("blocked by the sandbox: "+e.effectiveDirective+(e.blockedURI?" "+e.blockedURI:"")+" (html artifacts cannot use the network)"));` +
+    `document.addEventListener("securitypolicyviolation",(e)=>fail("blocked by the sandbox: "+e.effectiveDirective+(e.blockedURI?" "+e.blockedURI:"")+" (html artifacts cannot load from the network)"));` +
     `window.board=Object.freeze({width:${item.width},height:${item.height},colors:Object.freeze(${JSON.stringify(colors)}),font:"Charter, Cambria, Georgia, serif",` +
     `wait(){manual=true},ready(){if(!sent){sent=true;post("ready")}},fail(m){fail(m)}});` +
     // A timer, not requestAnimationFrame: browsers pause animation frames in frames off screen.
@@ -1224,6 +1227,8 @@ export class BoardServer {
     // A learner's page gets a frame only after the check page loaded it without hanging.
     this.frameChecks = new Map();
     this.frameCheckTries = new Map(); // mac -> background checks started for it
+    this.frameCheckErrors = new Map(); // mac -> checks that ended in an error saying nothing about the frame
+    this.frameUnderCheck = null; // { id, mac } the headless call running now is checking (the check page loads only it)
     this.frameCheck = null;
     this.autosave = autosave;
     this.autosaveTimer = null;
@@ -1833,12 +1838,12 @@ export class BoardServer {
   /**
    * Sent with every board state: frames { id: "/frame/<mac>" } the page may load, and frameStates
    * { id: { state: "checking" } | { state: "failed", reason } } for those it may not (yet). The
-   * headless check page (`snapshot`) also gets the next frame to check: loading it is the check.
+   * headless check page (`snapshot`) also gets the frame being checked: loading it is the check.
    */
   frames(snapshot = false) {
     const frames = {}, frameStates = {};
     if (!this.html) return { frames, frameStates };
-    const next = snapshot ? this.frameToCheck() : null;
+    const next = snapshot ? this.frameUnderCheck : null;
     for (const a of this.board.scene.artifacts) {
       if (a.type !== "html") continue;
       const mac = this.frameMac(a), check = this.frameChecks.get(mac);
@@ -1861,25 +1866,34 @@ export class BoardServer {
     }
     return null;
   }
-  /** [frameToCheck()] or [] (what a headless call is about to check). */
-  uncheckedFrames() {
-    const next = this.frameToCheck();
-    return next ? [next] : [];
+  /** A headless call starts checking the next unchecked frame: [{ id, mac }], or [] when none is left. */
+  startFrameCheck() {
+    this.frameUnderCheck = this.frameToCheck();
+    return this.frameUnderCheck ? [this.frameUnderCheck] : [];
   }
   /**
-   * Record a headless check of `list` (from uncheckedFrames): `states` (id -> the page's frame
-   * state) when the check finished, or the error that ended it. A frame that hung the check page
-   * is never sent to a learner; without a headless browser frames are sent unchecked.
+   * What the check of `list` (from startFrameCheck) showed: { states } (id -> the page's frame
+   * state) when the call finished, or the snapshotter's verdict on how it failed (see
+   * frameVerdict): { failed: reason } is final for that content; { unchecked: true } (no headless
+   * browser) lets it through unchecked; an { error } that says nothing about the frame is tried
+   * again, and the second one holds the frame back too, so it never stays "checking" for good.
    */
-  frameChecked(list, states, err) {
+  frameChecked(list, result = {}) {
+    this.frameUnderCheck = null;
     let changed = false;
     for (const { id, mac } of list) {
       if (this.frameChecks.has(mac)) continue;
-      if (err && /timed? ?out|Timeout \d+ms exceeded/i.test(String(err.message)))
-        this.frameChecks.set(mac, { state: "failed", reason: "not shown: in the headless check it was not ready within 8 s (an endless loop, a long computation, or board.wait() without board.ready()?)" });
-      else if (err && /no headless browser/i.test(String(err.message))) this.frameChecks.set(mac, { state: "unchecked" });
-      else if (!err && states?.[id] && states[id] !== "loading") this.frameChecks.set(mac, { state: "ok" });
-      else continue;
+      let check = null;
+      if (result.failed) check = { state: "failed", reason: `not shown: ${result.failed}` };
+      else if (result.unchecked) check = { state: "unchecked" };
+      else if (result.states?.[id] === "ready" || result.states?.[id] === "error") check = { state: "ok" };
+      else if (result.error && !result.aborted) {
+        const errors = (this.frameCheckErrors.get(mac) ?? 0) + 1;
+        this.frameCheckErrors.set(mac, errors);
+        if (errors >= 2) check = { state: "failed", reason: `not shown: the headless check failed twice while loading it (${String(result.error).split("\n")[0].slice(0, 160)})` };
+      }
+      if (!check) continue;
+      this.frameChecks.set(mac, check);
       changed = true;
     }
     if (changed) {
@@ -1908,6 +1922,7 @@ export class BoardServer {
     if (!item) return this.notFound(res);
     const body = frameDocument(item, vendorManifest());
     res.setHeader("Content-Security-Policy", frameCsp(this.port));
+    res.setHeader("X-DNS-Prefetch-Control", "off");
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-length": Buffer.byteLength(body) });
     res.end(body);
   }

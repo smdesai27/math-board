@@ -86,6 +86,7 @@ try { r.push("storage:" + localStorage.length); } catch (e) { r.push("storage:" 
 try { r.push("cookie:" + document.cookie); } catch (e) { r.push("cookie:" + e.name); }
 r.push("origin:" + origin);
 r.push("token-in-url:" + /[a-f0-9]{64}/.test(location.href));
+r.push("webrtc:" + typeof RTCPeerConnection + "/" + typeof webkitRTCPeerConnection);
 fetch("https://example.com/").then(() => r.push("fetch:ok"), () => r.push("fetch:blocked")).finally(() => { document.getElementById("out").textContent = r.join("\\n"); board.ready(); });
 board.wait();
 </script>` }] } });
@@ -97,6 +98,22 @@ board.wait();
   expect(text).toContain("cookie:SecurityError");
   expect(text).toContain("origin:null");
   expect(text).toContain("token-in-url:false");
+  expect(text).toContain("webrtc:undefined/undefined");
   expect(external).toEqual([]);
   await expect(page.locator('[data-frame="probe"]')).toHaveAttribute("data-error", /blocked by the sandbox: connect-src/);
+});
+
+test("a frame that freezes some seconds after it got ready does not stall the tutor's later checks", async () => {
+  // No learner page here: in a browser tab this frame would freeze the tab (a documented limit).
+  server.update({ scene: { mode: "append", artifacts: [{ type: "html", id: "late", x: 60, y: 100, width: 300, height: 200,
+    source: "<p>fine at first</p><script>setTimeout(() => { for (;;) {} }, 2500);</script>" }] } });
+  const first = await server.snapshots.lint();
+  expect(first.frames.late).toBe("ready");
+  await new Promise((r) => setTimeout(r, 3500)); // its loop would have started by now
+  for (const call of [() => server.snapshots.lint(), () => server.snapshots.capture({})]) {
+    const t0 = Date.now();
+    const r = await call();
+    expect(Date.now() - t0).toBeLessThan(2500);
+    expect(r.png ?? r.issues).toBeTruthy();
+  }
 });

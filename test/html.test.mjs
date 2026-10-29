@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { BoardServer, HTML_LIBS, applyUpdate, emptyBoard, frameCsp, frameDocument, htmlEnabled, restoreOps, sanitizeArtifact, vendorManifest } from "../server.mjs";
 import { BOARD_DOCS, handlers } from "../tools.mjs";
+import { FRAME_TIMEOUT, frameVerdict } from "../snapshot.mjs";
 
 const temps = [];
 test.after(async () => {
@@ -71,6 +72,8 @@ test("the frame document: bridge first, then the libraries, then the source with
   assert.ok(doc.indexOf("window.board=") < doc.indexOf(manifest.three), "the bridge runs before the libraries");
   assert.ok(doc.indexOf(manifest.three) < doc.indexOf(manifest.katex) && doc.includes(`href="/${manifest["katex.css"]}"`));
   assert.match(doc, /width:400,height:300/);
+  // WebRTC (which CSP cannot block) is switched off before any other script runs.
+  assert.ok(doc.indexOf('"RTCPeerConnection"') > 0 && doc.indexOf('"RTCPeerConnection"') < doc.indexOf(manifest.three));
   // A library missing from the build is reported by the frame, not silently skipped.
   assert.match(frameDocument({ ...item, libs: ["three"] }, {}), /board\.fail\("the three library is missing/);
   const csp = frameCsp(4321);
@@ -82,7 +85,8 @@ test("the server serves a frame only at its current address, with the frame's ow
   const { s, base, get } = await board(t, { html: true });
   s.snapshots.lint = async () => ({ items: [], issues: [], frames: {} });
   s.update({ scene: { mode: "append", artifacts: [HTML({ libs: ["fft"] })] } });
-  // The headless check page gets the address; a learner's page waits for the check.
+  // The headless check page gets the address of the frame it checks; a learner's page waits.
+  s.startFrameCheck();
   const snap = await (await get("/api/state", { "x-math-board-snapshot": "1" })).json();
   const url = snap.frames.h;
   assert.match(url, /^\/frame\/[a-f0-9]{32}$/);
@@ -94,6 +98,7 @@ test("the server serves a frame only at its current address, with the frame's ow
   assert.equal(r.headers.get("content-security-policy"), frameCsp(s.port));
   assert.match(r.headers.get("content-type"), /^text\/html/);
   assert.match(await r.text(), /<p>hi<\/p>/);
+  assert.equal(r.headers.get("x-dns-prefetch-control"), "off");
   assert.ok(!url.includes(s.token.slice(0, 16)));
   assert.equal((await fetch(`${base}/frame/${"0".repeat(32)}`)).status, 404);
   assert.equal((await fetch(`${base}/frame/nope`)).status, 404);
@@ -118,36 +123,52 @@ test("a board without html artifacts keeps its old policy and serves no frames",
   assert.equal(s.html, false);
 });
 
-test("the headless check: one frame at a time; a hang holds it back, no browser lets it through unchecked", async (t) => {
+test("the headless check: one frame at a time; a stall or crash holds it back, no browser lets it through unchecked", async (t) => {
   const { s, get } = await board(t, { html: true });
   const events = [];
   s.broadcast = (e) => events.push(e.type);
-  s.update({ scene: { mode: "append", artifacts: [HTML({ id: "a" }), HTML({ id: "b", x: 500 }), HTML({ id: "c", y: 400 })] } });
+  s.update({ scene: { mode: "append", artifacts: [HTML({ id: "a" }), HTML({ id: "b", x: 500 }), HTML({ id: "c", y: 400 }), HTML({ id: "e", x: 500, y: 400 })] } });
   const mac = (id) => s.frameMac(s.board.scene.artifacts.find((x) => x.id === id));
-  assert.deepEqual(s.uncheckedFrames(), [{ id: "a", mac: mac("a") }]);
   const snapFrames = async () => Object.keys((await (await get("/api/state", { "x-math-board-snapshot": "1" })).json()).frames);
+  assert.deepEqual(await snapFrames(), [], "between checks the check page gets no unchecked frame");
+  assert.deepEqual(s.startFrameCheck(), [{ id: "a", mac: mac("a") }]);
   assert.deepEqual(await snapFrames(), ["a"], "the check page loads only the frame being checked");
-  s.frameChecked(s.uncheckedFrames(), { a: "ready" });
+  s.frameChecked([{ id: "a", mac: mac("a") }], { states: { a: "ready" } });
   assert.deepEqual(events.filter((e) => e === "frames"), ["frames"], "pages are told to fetch the frames again");
-  s.frameChecked(s.uncheckedFrames(), null, Object.assign(new Error("Timeout 8000ms exceeded"), { name: "TimeoutError" }));
-  s.frameChecked(s.uncheckedFrames(), null, new Error("no headless browser available (…)"));
-  assert.deepEqual(s.uncheckedFrames(), []);
+  assert.equal(s.frameUnderCheck, null);
+  const verdict = (err, discarded) => frameVerdict(err, discarded);
+  s.frameChecked(s.startFrameCheck(), verdict(Object.assign(new Error("Timeout 8000ms exceeded"), { name: FRAME_TIMEOUT })));
+  s.frameChecked(s.startFrameCheck(), verdict(new Error("page.waitForFunction: Target crashed")));
+  s.frameChecked(s.startFrameCheck(), verdict(new Error("no headless browser available (browserType.launch: Timeout 180000ms exceeded)")));
+  assert.deepEqual(s.startFrameCheck(), []);
   const learner = await (await get("/api/state")).json();
-  assert.deepEqual(Object.keys(learner.frames), ["a", "c"]);
-  assert.equal(learner.frameStates.b.state, "failed");
-  assert.match(learner.frameStates.b.reason, /not shown: in the headless check it was not ready within 8 s/);
-  // A cancelled check decides nothing; an error state from the page still counts as loaded.
+  assert.deepEqual(Object.keys(learner.frames), ["a", "e"], "a checked frame and an unchecked one (no browser) load");
+  assert.match(learner.frameStates.b.reason, /^not shown: in the headless check it was not ready within 8 s/);
+  assert.match(learner.frameStates.c.reason, /^not shown: it crashed the headless check page/);
+  // Errors that say nothing about the frame: a cancelled call decides nothing, and neither does
+  // the call's own time limit, a slow launch or a browser closed under it, until it happens twice.
+  assert.deepEqual(verdict(Object.assign(new Error("cancelled"), { name: "AbortError" })), { error: "cancelled", aborted: true });
+  assert.deepEqual(verdict(new Error("layout check timed out after 20 s")), { error: "layout check timed out after 20 s" });
+  assert.deepEqual(verdict(new Error("Target closed"), true), { error: "Target closed" }, "closed by the time limit: not a crash");
   s.update({ scene: { mode: "append", artifacts: [HTML({ id: "d", y: 700 })] } });
-  s.frameChecked(s.uncheckedFrames(), null, new Error("cancelled"));
-  assert.deepEqual(s.uncheckedFrames().map((f) => f.id), ["d"]);
-  s.frameChecked(s.uncheckedFrames(), { d: "loading" });
-  assert.deepEqual(s.uncheckedFrames().map((f) => f.id), ["d"], "still loading when the check ended: not decided");
-  s.frameChecked(s.uncheckedFrames(), { d: "error" });
-  assert.deepEqual(s.uncheckedFrames(), []);
+  s.frameChecked(s.startFrameCheck(), verdict(Object.assign(new Error("cancelled"), { name: "AbortError" })));
+  s.frameChecked(s.startFrameCheck(), verdict(new Error("layout check timed out after 20 s")));
+  s.frameChecked(s.startFrameCheck(), { states: { d: "loading" } });
+  assert.deepEqual(s.startFrameCheck().map((f) => f.id), ["d"], "not decided yet");
+  s.frameChecked([{ id: "d", mac: mac("d") }], verdict(new Error("layout check timed out after 20 s")));
+  assert.deepEqual(s.startFrameCheck(), [], "the second such error holds it back instead of checking forever");
+  assert.match((await (await get("/api/state")).json()).frameStates.d.reason, /^not shown: the headless check failed twice while loading it \(layout check timed out after 20 s\)/);
+  // A frame deleted or changed during its check is not offered to the check page any more.
+  s.update({ scene: { mode: "append", artifacts: [HTML({ id: "f", x: 900 })] } });
+  assert.deepEqual(s.startFrameCheck().map((f) => f.id), ["f"]);
+  s.update({ items: [{ op: "update", id: "f", fields: { source: "<p>other</p>" } }] });
+  assert.deepEqual(await snapFrames(), ["a", "e"]);
+  s.frameChecked([{ id: "f", mac: "stale" }], { states: {} });
   // The check of a frame is per content: changing it checks it again.
+  assert.deepEqual(s.startFrameCheck().map((f) => f.id), ["f"]);
+  s.frameChecked(s.startFrameCheck(), { states: { f: "error" } });
   s.update({ items: [{ op: "update", id: "a", fields: { source: "<p>new</p>" } }] });
-  assert.deepEqual(s.uncheckedFrames().map((f) => f.id), ["a"]);
-  assert.notEqual(mac("a"), s.frameChecks.keys().next().value);
+  assert.deepEqual(s.startFrameCheck().map((f) => f.id), ["a"]);
 });
 
 test("a learner's page asking for the board starts the check in the background, at most twice per frame", async (t) => {

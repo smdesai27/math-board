@@ -976,17 +976,21 @@ const MemoArtifact = React.memo(Artifact, (a, b) => a.sig === b.sig);
 // (#frames), each placed over its slot in the SVG whenever the view, a step or a fade changes:
 // Safari neither scales nor places a frame inside an SVG foreignObject. A frame is loaded when its
 // slot first comes near the screen, reports "ready" or its errors by postMessage, and is stopped if
-// it is not ready within FRAME_READY_MS or navigates away. A snapshot page loads every frame, but
-// only once the snapshotter unpauses frames during a call it time-limits (a frame stuck in a loop
-// blocks the whole page), and hides them again between calls so their animations stop.
+// it is not ready within FRAME_READY_MS or navigates away. A snapshot page loads frames only while
+// the snapshotter runs a call it time-limits (a frame stuck in a loop blocks the whole page): the
+// one frame a layout check is checking, or all of them for a snapshot. Between calls none is
+// loaded, so no model code runs there while it waits.
 const FRAME_READY_MS = 5000;
 const EAGER_FRAMES = NO_FOLLOW;
 let framesPaused = NO_FOLLOW;
-if (framesPaused) document.documentElement.classList.add("frames-paused");
-window.__board.pauseFrames = (paused) => {
+let framesWanted = null; // snapshot page: ids of the frames this call loads (null: all)
+window.__board.pauseFrames = (paused, ids = null) => {
   framesPaused = paused;
-  document.documentElement.classList.toggle("frames-paused", paused);
-  if (!paused) syncFrames();
+  if (paused) for (const w of frameWrappers.values()) w.unmount();
+  else {
+    framesWanted = ids && new Set(ids);
+    syncFrames();
+  }
 };
 const frameStatus = new Map(); // id -> { state: "loading" | "ready" | "error", error }
 const frameStatusListeners = new Set();
@@ -1013,7 +1017,7 @@ function syncFrames() {
     w.el.style.visibility = hidden ? "hidden" : "";
     w.el.style.opacity = String((g.style.opacity === "" ? 1 : Number(g.style.opacity)) * Number(slot.dataset.opacity ?? 1));
     if (w.mounted || framesPaused) continue;
-    if (EAGER_FRAMES) w.mount();
+    if (EAGER_FRAMES) { if (!framesWanted || framesWanted.has(id)) w.mount(); }
     else if (!hidden) {
       const r = slot.getBoundingClientRect(), W = innerWidth, H = innerHeight;
       if (r.right > -W / 2 && r.left < W * 1.5 && r.bottom > -H / 2 && r.top < H * 1.5) w.mount();
@@ -1041,7 +1045,11 @@ function HtmlFrame({ id, url, item }) {
   const loads = React.useRef(0);
   const status = useFrameStatus(id);
   React.useLayoutEffect(() => {
-    const w = { el: ref.current, mounted: false, mount() { if (!w.mounted) { w.mounted = true; setMounted(true); } }, settle() {} };
+    const w = {
+      el: ref.current, mounted: false, settle() {},
+      mount() { if (!w.mounted) { w.mounted = true; setMounted(true); } },
+      unmount() { if (w.mounted) { w.mounted = false; setMounted(false); } },
+    };
     frameWrappers.set(id, w);
     syncFrames();
     return () => { if (frameWrappers.get(id) === w) { frameWrappers.delete(id); frameStatus.delete(id); } };
@@ -1355,7 +1363,8 @@ function render(data) {
 const sync = new BoardSync({ request, status: (text) => status(text), render: (data) => render(data) });
 // For the headless check page: read the board now; and whether an html artifact's frame has settled.
 window.__board.refresh = () => sync.refresh();
-window.__board.frameSettled = (id) => ["ready", "error"].includes(frameStatus.get(id)?.state);
+// A frame the board no longer offers (deleted or changed meanwhile) has nothing left to wait for.
+window.__board.frameSettled = (id) => ["ready", "error"].includes(frameStatus.get(id)?.state) || !lastData?.frames?.[id];
 const guarded = (fn) => (...args) => Promise.resolve().then(() => fn(...args)).catch((e) => status(e.message, true));
 
 /* ---------- the bar: a quiet pill at rest, the controls below it on hover, focus or tap ---------- */
