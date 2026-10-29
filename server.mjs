@@ -32,7 +32,7 @@ import { fileURLToPath } from "node:url";
 const VERSION_QUERY = new URL(import.meta.url).search;
 const sibling = (file) => new URL(`./${file}${VERSION_QUERY}`, import.meta.url).href;
 const { Snapshotter } = await import(sibling("snapshot.mjs"));
-const { compileExpr } = await import(sibling("shared/expr.mjs"));
+const { compileExpr, EXPR_FUNCTIONS } = await import(sibling("shared/expr.mjs"));
 const { checkSvgSource, SVG_TAGS, SVG_ATTRS, MAX_SVG_BYTES } = await import(sibling("shared/svg.mjs"));
 export { checkSvgSource, SVG_TAGS, SVG_ATTRS };
 
@@ -419,15 +419,41 @@ function checkExpr(src, vars, where) {
   try { compileExpr(src, vars); return src; } catch (e) { fail(`plot ${where}: "${String(src).slice(0, 60)}": ${e.message}`); }
 }
 const STYLE_KEYS = ["color", "width", "dash", "label"];
-const PLOT_KEYS = ["xRange", "yRange", "grid", "axes", "ticks", "equalAspect", "xLabel", "yLabel", "title", "functions", "parametric", "areas", "points", "vlines", "hlines"];
+const PLOT_KEYS = ["xRange", "yRange", "grid", "axes", "ticks", "equalAspect", "xLabel", "yLabel", "title", "params", "functions", "parametric", "areas", "points", "vlines", "hlines"];
 const PLOT_PART_KEYS = {
+  params: keys("name", "min", "max", "value", "step", "label", "period"),
   functions: keys("expr", "domain", STYLE_KEYS),
   parametric: keys("x", "y", "t", STYLE_KEYS),
   areas: keys("expr", "lower", "from", "to", STYLE_KEYS),
-  points: keys("x", "y", "size", STYLE_KEYS),
+  points: keys("x", "y", "size", "drag", STYLE_KEYS),
   vlines: keys("x", STYLE_KEYS),
   hlines: keys("y", STYLE_KEYS),
 };
+// A slider's name is a variable in the plot's expressions, so it cannot be one of their own names.
+const PARAM_NAME = /^[A-Za-z][A-Za-z0-9_]{0,15}$/;
+const RESERVED_PARAM_NAMES = new Set(["x", "t", "pi", "e", "tau", "inf", ...EXPR_FUNCTIONS]);
+/** A slider: a named value in [min, max] the learner can drag (or play) and the plot redraws with. */
+function sanitizeParam(p, pr, i, strict) {
+  const at = `plot params[${i}]`;
+  const name = typeof p.name === "string" ? p.name.trim() : "";
+  if (!PARAM_NAME.test(name) || RESERVED_PARAM_NAMES.has(name))
+    fail(`${at}.name must be a short name such as "a" or "omega" (a letter, then letters, digits or _; not x, t, a constant or a function name), got ${show(p.name)}`);
+  const min = p.min, max = p.max;
+  if (!(typeof min === "number" && typeof max === "number" && Number.isFinite(min) && Number.isFinite(max) && max - min > 1e-9 * Math.max(1, Math.abs(min), Math.abs(max))))
+    fail(`${at} "${name}": min and max must be numbers with min < max`);
+  const out = { name, min: NUMBER(min), max: NUMBER(max) };
+  out.value = clamp(pr.num("value", out.min), out.min, out.max);
+  const step = pr.num("step");
+  if (step !== undefined) {
+    if (step > 0 && step <= out.max - out.min) out.step = step;
+    else if (strict) fail(`${at} "${name}": step must be more than 0 and at most max - min`);
+  }
+  const label = pr.str("label", 40);
+  if (label) out.label = label;
+  const period = pr.num("period");
+  if (period !== undefined) out.period = clamp(period, 0.5, 60);
+  return out;
+}
 /** Declarative function plot. Expressions are parsed by shared/expr.mjs (no eval). */
 function sanitizePlot(raw, strict, where) {
   const out = {};
@@ -457,15 +483,35 @@ function sanitizePlot(raw, strict, where) {
     const l = pr.str("label", 80); if (l) o.label = l;
     return o;
   };
-  out.functions = list("functions", 12).map(([f, pr, i]) => ({ expr: checkExpr(f.expr, ["x"], `functions[${i}]`), ...style(pr), ...(f.domain !== undefined ? { domain: range(f.domain, `functions[${i}].domain`) } : {}) }));
-  out.parametric = list("parametric", 8).map(([f, pr, i]) => ({ x: checkExpr(f.x, ["t"], `parametric[${i}].x`), y: checkExpr(f.y, ["t"], `parametric[${i}].y`), t: range(f.t, `parametric[${i}].t`, [0, 2 * Math.PI]), ...style(pr) }));
-  out.areas = list("areas", 6).map(([a, pr, i]) => ({ expr: checkExpr(a.expr, ["x"], `areas[${i}]`), ...(a.lower !== undefined ? { lower: checkExpr(a.lower, ["x"], `areas[${i}].lower`) } : {}), from: pr.num("from", 0), to: pr.num("to", 0), ...style(pr) }));
-  out.points = list("points", 200).map(([pt, pr]) => {
+  const params = list("params", 6).map(([p, pr, i]) => sanitizeParam(p, pr, i, strict));
+  const names = params.map((p) => p.name);
+  const twice = names.find((n, i) => names.indexOf(n) !== i);
+  if (twice) fail(`plot params: "${twice}" is used twice`);
+  if (params.length) out.params = params;
+  // Every expression may use the sliders; a coordinate (point, line, area end) may be an
+  // expression of them instead of a number when the plot has sliders.
+  const vars = (v) => [v, ...names];
+  const coord = (part, pr, key, fallback, at) => {
+    const v = part[key];
+    if (typeof v === "string" && names.length) return checkExpr(v, names, `${at}.${key}`).trim();
+    if (typeof v === "string" && strict) fail(`plot ${at}.${key} must be a number (an expression such as "a" needs params on the plot), got ${show(v)}`);
+    return pr.num(key, fallback);
+  };
+  out.functions = list("functions", 12).map(([f, pr, i]) => ({ expr: checkExpr(f.expr, vars("x"), `functions[${i}]`), ...style(pr), ...(f.domain !== undefined ? { domain: range(f.domain, `functions[${i}].domain`) } : {}) }));
+  out.parametric = list("parametric", 8).map(([f, pr, i]) => ({ x: checkExpr(f.x, vars("t"), `parametric[${i}].x`), y: checkExpr(f.y, vars("t"), `parametric[${i}].y`), t: range(f.t, `parametric[${i}].t`, [0, 2 * Math.PI]), ...style(pr) }));
+  out.areas = list("areas", 6).map(([a, pr, i]) => ({ expr: checkExpr(a.expr, vars("x"), `areas[${i}]`), ...(a.lower !== undefined ? { lower: checkExpr(a.lower, vars("x"), `areas[${i}].lower`) } : {}), from: coord(a, pr, "from", 0, `areas[${i}]`), to: coord(a, pr, "to", 0, `areas[${i}]`), ...style(pr) }));
+  out.points = list("points", 200).map(([pt, pr, i]) => {
     const size = pr.num("size");
-    return { x: pr.num("x", 0), y: pr.num("y", 0), ...style(pr), ...(size !== undefined ? { size: clamp(size, 1, 20) } : {}) };
+    const o = { x: coord(pt, pr, "x", 0, `points[${i}]`), y: coord(pt, pr, "y", 0, `points[${i}]`), ...style(pr), ...(size !== undefined ? { size: clamp(size, 1, 20) } : {}) };
+    // A draggable point moves the slider(s) its x and/or y is bound to.
+    if (pr.bool("drag") === true) {
+      if ([o.x, o.y].some((v) => names.includes(v))) o.drag = true;
+      else if (strict) fail(`plot points[${i}]: drag needs x or y to be a slider name, e.g. {x:"a", y:"sin(a)", drag:true}`);
+    }
+    return o;
   });
-  out.vlines = list("vlines", 12).map(([, pr]) => ({ x: pr.num("x", 0), ...style(pr) }));
-  out.hlines = list("hlines", 12).map(([, pr]) => ({ y: pr.num("y", 0), ...style(pr) }));
+  out.vlines = list("vlines", 12).map(([v, pr, i]) => ({ x: coord(v, pr, "x", 0, `vlines[${i}]`), ...style(pr) }));
+  out.hlines = list("hlines", 12).map(([h, pr, i]) => ({ y: coord(h, pr, "y", 0, `hlines[${i}]`), ...style(pr) }));
   if (!out.functions.length && !out.parametric.length && !out.points.length && !out.areas.length) fail("plot needs at least one of functions, parametric, points or areas");
   return out;
 }

@@ -389,7 +389,8 @@ function installNavigation() {
   }, { passive: false });
   let drag = null, pressMoved = false;
   surface.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0 || e.target.closest("input,button,a")) return;
+    // Sliders, ▶ and draggable points on a plot handle their own pointer.
+    if (e.button !== 0 || e.target.closest("input,button,a,[data-control]")) return;
     drag = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
     surface.setPointerCapture(e.pointerId);
     surface.classList.add("dragging");
@@ -409,9 +410,9 @@ function installNavigation() {
   window.addEventListener("resize", () => { updateViewScale(); scheduleRef(); });
   // A click on an item copies its reference (after a short wait, so the first
   // click of a double-click does not copy); a drag that ends on an item does not.
-  surface.addEventListener("click", (e) => { if (!pressMoved) refClick(e); });
+  surface.addEventListener("click", (e) => { if (!pressMoved && !e.target.closest("[data-control]")) refClick(e); });
   surface.addEventListener("mousedown", (e) => { if (e.detail > 1) cancelCopy(); });
-  surface.addEventListener("dblclick", () => { cancelCopy(); setFollow(true); });
+  surface.addEventListener("dblclick", (e) => { cancelCopy(); if (!e.target.closest("[data-control]")) setFollow(true); });
   // Safari trackpad pinch.
   let gestureStart = 1;
   surface.addEventListener("gesturestart", (e) => { e.preventDefault(); manual(); gestureStart = e.scale; });
@@ -590,14 +591,14 @@ function fmtTick(v, step) {
   const s = (Math.abs(v) < step / 1e6 ? 0 : v).toFixed(Math.min(6, d));
   return s.replace("-", "−");
 }
-function samplePath(fn, a, b, n, sx, sy, ySpan) {
+function samplePath(at, a, b, n, sx, sy, ySpan) {
   // Polyline segments in screen coords, broken at NaN/∞ and asymptote-like jumps.
   const segs = [];
   let cur = [], prev = null;
   for (let i = 0; i <= n; i++) {
     const x = a + ((b - a) * i) / n;
     let y;
-    try { y = fn({ x }); } catch { y = NaN; }
+    try { y = at(x); } catch { y = NaN; }
     if (!Number.isFinite(y) || (prev !== null && Math.abs(y - prev) > ySpan * 3)) { if (cur.length > 1) segs.push(cur); cur = []; prev = Number.isFinite(y) ? y : null; if (!Number.isFinite(y)) continue; }
     cur.push([sx(x), sy(y)]);
     prev = y;
@@ -606,35 +607,169 @@ function samplePath(fn, a, b, n, sx, sy, ySpan) {
   return segs;
 }
 const pts = (seg) => seg.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-function Plot({ item }) {
-  const compiled = React.useMemo(() => {
-    const c = (src, vars) => { try { return compileExpr(src, vars); } catch { return () => NaN; } };
-    return {
-      functions: (item.functions || []).map((f) => ({ ...f, fn: c(f.expr, ["x"]) })),
-      parametric: (item.parametric || []).map((f) => ({ ...f, fx: c(f.x, ["t"]), fy: c(f.y, ["t"]) })),
-      areas: (item.areas || []).map((a) => ({ ...a, fn: c(a.expr, ["x"]), lo: a.lower ? c(a.lower, ["x"]) : () => 0 })),
+
+/* ---------- sliders (a plot's params) ---------- */
+// A plot's params are sliders the learner drags, or plays, and the plot redraws with them. The
+// values live in this page only: the board, snapshots and other tabs keep each slider's `value`.
+// A click on the plot copies its reference with the values the learner has set.
+const SLIDER_ROW = 34;
+const NO_PARAMS = [];
+const initialValues = (params) => Object.fromEntries(params.map((p) => [p.name, p.value]));
+function snapParam(p, v) {
+  let out = Math.min(p.max, Math.max(p.min, Number.isFinite(v) ? v : p.value));
+  if (p.step) out = Math.min(p.max, p.min + Math.round((out - p.min) / p.step) * p.step);
+  return out;
+}
+function fmtParam(p, v) {
+  const unit = p.step || (p.max - p.min) / 100;
+  const d = Math.max(0, Math.min(6, -Math.floor(Math.log10(unit) + 1e-9)));
+  return (Math.abs(v) < unit / 1e6 ? 0 : v).toFixed(d).replace("-", "−");
+}
+/**
+ * Slider values for one plot. set(name, v) takes a value or a function of the current one (so two
+ * key presses in one frame both count) and coalesces to one render per frame; ▶ sweeps min → max → min.
+ */
+function usePlotParams(params) {
+  const [values, setValues] = React.useState(() => initialValues(params));
+  const [playing, setPlaying] = React.useState(() => new Set());
+  const current = React.useRef(values);
+  current.current = values;
+  const pending = React.useRef([]), frame = React.useRef(0);
+  const set = React.useCallback((name, v) => {
+    pending.current.push([name, v]);
+    if (frame.current) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0;
+      const changes = pending.current;
+      pending.current = [];
+      setValues((old) => {
+        const out = { ...old };
+        for (const [n, f] of changes) out[n] = typeof f === "function" ? f(out[n]) : f;
+        return out;
+      });
+    });
+  }, []);
+  React.useEffect(() => () => cancelAnimationFrame(frame.current), []);
+  const stop = React.useCallback((...names) => setPlaying((old) => (names.some((n) => old.has(n)) ? new Set([...old].filter((n) => !names.includes(n))) : old)), []);
+  const togglePlay = React.useCallback((name) => setPlaying((old) => { const next = new Set(old); if (!next.delete(name)) next.add(name); return next; }), []);
+  React.useEffect(() => {
+    if (!playing.size || STATIC) return;
+    const t0 = performance.now(), from = { ...current.current };
+    let raf = 0;
+    const tick = (now) => {
+      const next = {};
+      for (const p of params) {
+        if (!playing.has(p.name)) continue;
+        // Phase in [0, 2): up from min to max, then back down; `period` seconds each way.
+        const span = p.max - p.min, phase = ((from[p.name] - p.min) / span + (now - t0) / ((p.period ?? 4) * 1000)) % 2;
+        next[p.name] = snapParam(p, p.min + span * (phase <= 1 ? phase : 2 - phase));
+      }
+      setValues((old) => ({ ...old, ...next }));
+      raf = requestAnimationFrame(tick);
     };
-  }, [item]);
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, params]);
+  return { values, set, playing, stop, togglePlay };
+}
+/** One slider row: ▶/❚❚, the label, the track and the value. Drag, click or use the arrow keys. */
+const sliderLabel = (p) => p.label || p.name;
+// Rough label width (serif italic, ~9 px per character): every row of a plot starts its track there.
+const sliderLabelWidth = (params) => Math.min(150, Math.max(16, ...params.map((p) => sliderLabel(p).length * 9)));
+function Slider({ p, value, y, left, right, labelWidth, playing, onValue, onPlay, onGrab }) {
+  const track = React.useRef(null);
+  const label = sliderLabel(p);
+  const playX = left + 12, labelX = left + 32;
+  const x0 = labelX + labelWidth + 14, x1 = right - 66;
+  const kx = x0 + ((x1 - x0) * (value - p.min)) / (p.max - p.min);
+  const fromClient = (clientX) => {
+    const m = track.current?.getScreenCTM();
+    if (!m) return value;
+    const q = new DOMPoint(clientX, 0).matrixTransform(m.inverse());
+    return snapParam(p, p.min + ((q.x - x0) / (x1 - x0)) * (p.max - p.min));
+  };
+  const down = (e) => {
+    if (e.button !== 0) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    onGrab();
+    onValue(fromClient(e.clientX));
+  };
+  const move = (e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) onValue(fromClient(e.clientX)); };
+  const key = (e) => {
+    const unit = p.step || (p.max - p.min) / 100;
+    const by = { ArrowLeft: -unit, ArrowDown: -unit, ArrowRight: unit, ArrowUp: unit, PageDown: -10 * unit, PageUp: 10 * unit, Home: -Infinity, End: Infinity }[e.key];
+    if (by === undefined) return;
+    e.preventDefault();
+    e.stopPropagation(); // the board's own arrow keys step through the lesson
+    onGrab();
+    onValue((v) => snapParam(p, Number.isFinite(by) ? v + by : by > 0 ? p.max : p.min));
+  };
+  const playKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); onPlay(); } };
+  const font = { fontFamily: FONTS.serif };
+  return <g className="plot-slider">
+    <g className="slider-play" data-control="play" role="button" tabIndex={0} aria-label={`${playing ? "Pause" : "Play"} ${label}`} onClick={onPlay} onKeyDown={playKey}>
+      <circle cx={playX} cy={y} r="11" fill="#ffffff12" stroke="#8a8578" strokeWidth="1.2" />
+      {playing
+        ? <path d={`M${playX - 3.5} ${y - 5}v10M${playX + 3.5} ${y - 5}v10`} stroke="#e8e3d9" strokeWidth="2.4" strokeLinecap="round" />
+        : <path d={`M${playX - 3.2} ${y - 6}l9 6-9 6z`} fill="#e8e3d9" />}
+    </g>
+    <text x={labelX} y={y + 6} fill={PLOT_INK.label} fontSize="17" style={{ ...font, fontStyle: "italic" }}>{label}</text>
+    <g ref={track} className="slider-track" data-control="slider" role="slider" tabIndex={0} aria-label={label} aria-valuemin={p.min} aria-valuemax={p.max} aria-valuenow={value} aria-valuetext={fmtParam(p, value)} onPointerDown={down} onPointerMove={move} onKeyDown={key}>
+      <rect x={x0 - 12} y={y - 15} width={x1 - x0 + 24} height="30" fill="transparent" />
+      <line x1={x0} y1={y} x2={x1} y2={y} stroke="#4f4c45" strokeWidth="3" strokeLinecap="round" />
+      <line x1={x0} y1={y} x2={kx} y2={y} stroke="#f2c14e" strokeWidth="3" strokeLinecap="round" />
+      <circle className="knob" cx={kx} cy={y} r="8" fill="#e8e3d9" stroke="#000" strokeWidth="1.5" />
+    </g>
+    <text x={right} y={y + 6} fill="#f2c14e" fontSize="16" textAnchor="end" style={{ ...font, fontVariantNumeric: "tabular-nums" }}>{fmtParam(p, value)}</text>
+  </g>;
+}
+
+function Plot({ item }) {
+  const params = item.params || NO_PARAMS;
+  const { values, set, playing, stop, togglePlay } = usePlotParams(params);
+  const root = React.useRef(null);
+  const compiled = React.useMemo(() => {
+    const names = params.map((p) => p.name);
+    const c = (src, vars) => { try { return compileExpr(src, vars); } catch { return () => NaN; } };
+    // A coordinate is a number, or (on a plot with sliders) an expression of them.
+    const k = (v) => (typeof v === "string" ? c(v, names) : () => v);
+    return {
+      functions: (item.functions || []).map((f) => ({ ...f, fn: c(f.expr, ["x", ...names]) })),
+      parametric: (item.parametric || []).map((f) => ({ ...f, fx: c(f.x, ["t", ...names]), fy: c(f.y, ["t", ...names]) })),
+      areas: (item.areas || []).map((a) => ({ ...a, fn: c(a.expr, ["x", ...names]), lo: a.lower ? c(a.lower, ["x", ...names]) : () => 0, fromAt: k(a.from), toAt: k(a.to) })),
+      points: (item.points || []).map((p) => ({ ...p, xAt: k(p.x), yAt: k(p.y) })),
+      vlines: (item.vlines || []).map((v) => ({ ...v, at: k(v.x) })),
+      hlines: (item.hlines || []).map((h) => ({ ...h, at: k(h.y) })),
+    };
+  }, [item, params]);
   const W = item.width, H = item.height;
   // The y-axis label sits above the plot area (a row of its own), so it never lands on the
-  // curve's maximum or a point label at the top of the axis.
-  const padL = 46, padR = 18, padT = (item.title ? 34 : 14) + (item.yLabel ? 24 : 0), padB = 34;
+  // curve's maximum or a point label at the top of the axis. Slider rows sit below the x axis.
+  const padL = 46, padR = 18, padT = (item.title ? 34 : 14) + (item.yLabel ? 24 : 0), padB = 34 + params.length * SLIDER_ROW;
   let [x0, x1] = item.xRange || [-10, 10];
   if (!(x1 > x0)) { x0 -= 1; x1 += 1; } // a range whose ends were clamped to the same value
-  let [y0, y1] = item.yRange || [NaN, NaN];
-  if (!Number.isFinite(y0)) {
-    // Auto y-range from samples (robust to asymptotes via percentiles).
-    const ys = [];
-    for (const f of compiled.functions) for (let i = 0; i <= 200; i++) { const v = f.fn({ x: x0 + ((x1 - x0) * i) / 200 }); if (Number.isFinite(v)) ys.push(v); }
-    for (const f of compiled.parametric) for (let i = 0; i <= 200; i++) { const t = f.t[0] + ((f.t[1] - f.t[0]) * i) / 200, v = f.fy({ t }); if (Number.isFinite(v)) ys.push(v); }
-    for (const p of item.points || []) ys.push(p.y);
-    for (const h of item.hlines || []) ys.push(h.y);
+  const fitted = React.useMemo(() => {
+    if (item.yRange) return null;
+    // Auto y-range from samples (robust to asymptotes via percentiles). With sliders it covers
+    // each slider's ends too, and is fitted once, so the axes stay put while a slider moves.
+    const base = initialValues(params), sets = [base];
+    for (const p of params) sets.push({ ...base, [p.name]: p.min }, { ...base, [p.name]: p.max });
+    const ys = [], add = (v) => { if (Number.isFinite(v)) ys.push(v); };
+    for (const s of sets) {
+      for (const f of compiled.functions) for (let i = 0; i <= 200; i++) { s.x = x0 + ((x1 - x0) * i) / 200; add(f.fn(s)); }
+      for (const f of compiled.parametric) for (let i = 0; i <= 200; i++) { s.t = f.t[0] + ((f.t[1] - f.t[0]) * i) / 200; add(f.fy(s)); }
+      for (const p of compiled.points) add(p.yAt(s));
+      for (const h of compiled.hlines) add(h.at(s));
+    }
     ys.sort((a, b) => a - b);
     const lo = ys.length ? ys[Math.floor(ys.length * 0.02)] : -1, hi = ys.length ? ys[Math.ceil(ys.length * 0.98) - 1] : 1;
     const pad = (hi - lo || 2) * 0.12;
-    y0 = lo - pad; y1 = hi + pad;
-  }
+    return [lo - pad, hi + pad];
+  }, [item, params, compiled, x0, x1]);
+  let [y0, y1] = item.yRange || fitted;
   if (!(y1 > y0)) { y0 -= 1; y1 += 1; }
+  const scope = { ...values };
+  const ev = (fn) => { try { return fn(scope); } catch { return NaN; } };
   let iw = W - padL - padR, ih = H - padT - padB, ox = padL, oy = padT;
   if (item.equalAspect) {
     const k = Math.min(iw / (x1 - x0), ih / (y1 - y0));
@@ -653,36 +788,54 @@ function Plot({ item }) {
   const curves = compiled.functions.map((f, i) => {
     const color = f.color || PLOT_COLORS[i % PLOT_COLORS.length];
     const [a, b] = f.domain || [x0, x1];
-    const segs = samplePath(f.fn, Math.max(a, x0), Math.min(b, x1), Math.max(200, Math.round(iw * 1.5)), sx, sy, y1 - y0);
+    const segs = samplePath((x) => { scope.x = x; return f.fn(scope); }, Math.max(a, x0), Math.min(b, x1), Math.max(200, Math.round(iw * 1.5)), sx, sy, y1 - y0);
     if (f.label && segs.length) { const last = segs[segs.length - 1].filter(([, y]) => y >= top && y <= bottom).pop(); if (last) labels.push(<text key={`fl${i}`} x={Math.min(last[0] + 6, right - 4)} y={last[1] - 8} fill={color} fontSize="16" textAnchor={last[0] > right - 60 ? "end" : "start"} {...HALO} style={{ ...font, fontStyle: "italic" }}>{f.label}</text>); }
     return segs.map((seg, j) => <polyline key={`f${i}-${j}`} points={pts(seg)} fill="none" stroke={color} strokeWidth={f.width || 3} strokeDasharray={f.dash} strokeLinejoin="round" strokeLinecap="round" />);
   });
-  const params = compiled.parametric.map((f, i) => {
+  const paramCurves = compiled.parametric.map((f, i) => {
     const color = f.color || PLOT_COLORS[(i + compiled.functions.length) % PLOT_COLORS.length];
     const seg = [];
-    for (let k = 0; k <= 600; k++) { const t = f.t[0] + ((f.t[1] - f.t[0]) * k) / 600, X = f.fx({ t }), Y = f.fy({ t }); if (Number.isFinite(X) && Number.isFinite(Y)) seg.push([sx(X), sy(Y)]); }
+    for (let k = 0; k <= 600; k++) { scope.t = f.t[0] + ((f.t[1] - f.t[0]) * k) / 600; const X = ev(f.fx), Y = ev(f.fy); if (Number.isFinite(X) && Number.isFinite(Y)) seg.push([sx(X), sy(Y)]); }
     if (f.label && seg.length) labels.push(<text key={`pl${i}`} x={seg[seg.length - 1][0] + 6} y={seg[seg.length - 1][1] - 8} fill={color} fontSize="16" {...HALO} style={{ ...font, fontStyle: "italic" }}>{f.label}</text>);
     return seg.length > 1 ? <polyline key={`p${i}`} points={pts(seg)} fill="none" stroke={color} strokeWidth={f.width || 3} strokeDasharray={f.dash} strokeLinejoin="round" /> : null;
   });
   const areas = compiled.areas.map((a, i) => {
-    const from = Math.max(Math.min(a.from, a.to), x0), to = Math.min(Math.max(a.from, a.to), x1), n = 160;
+    const A = ev(a.fromAt), B = ev(a.toAt);
+    if (!Number.isFinite(A) || !Number.isFinite(B)) return null;
+    const from = Math.max(Math.min(A, B), x0), to = Math.min(Math.max(A, B), x1), n = 160;
     const upper = [], lower = [];
-    for (let k = 0; k <= n; k++) { const x = from + ((to - from) * k) / n, u = a.fn({ x }), l = a.lo({ x }); if (Number.isFinite(u) && Number.isFinite(l)) { upper.push([sx(x), sy(u)]); lower.push([sx(x), sy(l)]); } }
+    for (let k = 0; k <= n; k++) { scope.x = from + ((to - from) * k) / n; const u = ev(a.fn), l = ev(a.lo); if (Number.isFinite(u) && Number.isFinite(l)) { upper.push([sx(scope.x), sy(u)]); lower.push([sx(scope.x), sy(l)]); } }
     const color = a.color || "#f2c14e";
     return upper.length > 1 ? <polygon key={`a${i}`} points={pts([...upper, ...lower.reverse()])} fill={color} fillOpacity="0.26" stroke="none" /> : null;
   });
-  // Rough text width (serif, ~0.5 em per character) to keep the y label inside the plot's box.
+  const hlines = compiled.hlines.map((h) => ({ ...h, v: ev(h.at) })).filter((h) => Number.isFinite(h.v));
+  const vlines = compiled.vlines.map((v) => ({ ...v, v: ev(v.at) })).filter((v) => Number.isFinite(v.v));
+  // A draggable point moves the slider(s) its x and/or y is bound to.
+  const byName = new Map(params.map((p) => [p.name, p]));
+  const dragTo = (pt, e) => {
+    const m = root.current?.getScreenCTM();
+    if (!m) return;
+    const q = new DOMPoint(e.clientX, e.clientY).matrixTransform(m.inverse());
+    const X = x0 + ((q.x - left) / iw) * (x1 - x0), Y = y0 + ((bottom - q.y) / ih) * (y1 - y0);
+    if (byName.has(pt.x)) set(pt.x, snapParam(byName.get(pt.x), X));
+    if (byName.has(pt.y)) set(pt.y, snapParam(byName.get(pt.y), Y));
+  };
+  const dragHandlers = (pt) => ({
+    onPointerDown: (e) => { if (e.button !== 0) return; e.currentTarget.setPointerCapture(e.pointerId); stop(pt.x, pt.y); dragTo(pt, e); },
+    onPointerMove: (e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) dragTo(pt, e); },
+  });
   const yLabelX = item.yLabel ? Math.min(Math.max(sx(axY), item.x + item.yLabel.length * 4.4 + 4), item.x + W - item.yLabel.length * 4.4 - 4) : 0;
-  return <g className="plot">
+  const rowsTop = item.y + H - params.length * SLIDER_ROW;
+  return <g className="plot" ref={root} data-params={params.length ? params.map((p) => `${p.name} = ${fmtParam(p, values[p.name])}`).join(", ") : undefined}>
     <defs><clipPath id={clipId}><rect x={left} y={top} width={iw} height={ih} /></clipPath></defs>
     {item.title ? <text x={item.x + W / 2} y={item.y + 22} fill="#e8e3d9" fontSize="20" textAnchor="middle" style={font}>{item.title}</text> : null}
     {item.grid !== false ? <g stroke={PLOT_INK.grid} strokeWidth="1">{xticks.map((v) => <line key={`gx${v}`} x1={sx(v)} y1={top} x2={sx(v)} y2={bottom} />)}{yticks.map((v) => <line key={`gy${v}`} x1={left} y1={sy(v)} x2={right} y2={sy(v)} />)}</g> : null}
     <g clipPath={`url(#${clipId})`}>{areas}</g>
     {item.axes !== false ? <g className="plot-axes" stroke={PLOT_INK.axis} strokeWidth="1.6"><line x1={left} y1={sy(axX)} x2={right} y2={sy(axX)} /><line x1={sx(axY)} y1={top} x2={sx(axY)} y2={bottom} /></g> : null}
     <g clipPath={`url(#${clipId})`}>
-      {(item.hlines || []).map((h, i) => <line key={`h${i}`} x1={left} y1={sy(h.y)} x2={right} y2={sy(h.y)} stroke={h.color || PLOT_INK.axis} strokeWidth={h.width || 1.5} strokeDasharray={h.dash || "6 5"} />)}
-      {(item.vlines || []).map((v, i) => <line key={`v${i}`} x1={sx(v.x)} y1={top} x2={sx(v.x)} y2={bottom} stroke={v.color || PLOT_INK.axis} strokeWidth={v.width || 1.5} strokeDasharray={v.dash || "6 5"} />)}
-      {curves}{params}
+      {hlines.map((h, i) => <line key={`h${i}`} x1={left} y1={sy(h.v)} x2={right} y2={sy(h.v)} stroke={h.color || PLOT_INK.axis} strokeWidth={h.width || 1.5} strokeDasharray={h.dash || "6 5"} />)}
+      {vlines.map((v, i) => <line key={`v${i}`} x1={sx(v.v)} y1={top} x2={sx(v.v)} y2={bottom} stroke={v.color || PLOT_INK.axis} strokeWidth={v.width || 1.5} strokeDasharray={v.dash || "6 5"} />)}
+      {curves}{paramCurves}
     </g>
     {/* Labels go on top of the curves with a thin black halo, so a curve or a dashed marker
         crossing a tick label interrupts the line instead of striking through the text. */}
@@ -690,12 +843,23 @@ function Plot({ item }) {
       {xticks.filter((v) => Math.abs(v - axY) > xs / 2 || item.axes === false).map((v) => <text key={`tx${v}`} x={sx(v)} y={Math.min(sy(axX) + 19, bottom + 19)} textAnchor="middle">{fmtTick(v, xs)}</text>)}
       {yticks.filter((v) => Math.abs(v - axX) > ysStep / 2 || item.axes === false).map((v) => <text key={`ty${v}`} x={Math.max(sx(axY) - 7, left - 7)} y={sy(v) + 5} textAnchor="end">{fmtTick(v, ysStep)}</text>)}
     </g> : null}
-    {(item.hlines || []).map((h, i) => h.label && h.y >= y0 && h.y <= y1 ? <text key={`hl${i}`} x={right - 4} y={sy(h.y) - 7} fill={h.color || PLOT_INK.label} fontSize="15" textAnchor="end" {...HALO} style={{ ...font, fontStyle: "italic" }}>{h.label}</text> : null)}
-    {(item.vlines || []).map((v, i) => v.label && v.x >= x0 && v.x <= x1 ? <text key={`vl${i}`} x={sx(v.x) + 5} y={top + 15} fill={v.color || PLOT_INK.label} fontSize="15" {...HALO} style={{ ...font, fontStyle: "italic" }}>{v.label}</text> : null)}
+    {hlines.map((h, i) => h.label && h.v >= y0 && h.v <= y1 ? <text key={`hl${i}`} x={right - 4} y={sy(h.v) - 7} fill={h.color || PLOT_INK.label} fontSize="15" textAnchor="end" {...HALO} style={{ ...font, fontStyle: "italic" }}>{h.label}</text> : null)}
+    {vlines.map((v, i) => v.label && v.v >= x0 && v.v <= x1 ? <text key={`vl${i}`} x={sx(v.v) + 5} y={top + 15} fill={v.color || PLOT_INK.label} fontSize="15" {...HALO} style={{ ...font, fontStyle: "italic" }}>{v.label}</text> : null)}
     {item.xLabel ? <text className="plot-xlabel" x={right} y={Math.min(sy(axX) + 34, bottom + 31)} fill={PLOT_INK.label} fontSize="17" textAnchor="end" {...HALO} style={{ ...font, fontStyle: "italic" }}>{item.xLabel}</text> : null}
     {item.yLabel ? <text className="plot-ylabel" x={yLabelX} y={top - 8} fill={PLOT_INK.label} fontSize="17" textAnchor="middle" {...HALO} style={{ ...font, fontStyle: "italic" }}>{item.yLabel}</text> : null}
-    {(item.points || []).map((p, i) => <g key={`pt${i}`}><circle cx={sx(p.x)} cy={sy(p.y)} r={p.size || 5} fill={p.color || "#e8e3d9"} />{p.label ? <text x={sx(p.x) + 9} y={sy(p.y) - 9} fill={p.color || "#e8e3d9"} fontSize="16" {...HALO} style={font}>{p.label}</text> : null}</g>)}
+    {compiled.points.map((p, i) => {
+      const X = ev(p.xAt), Y = ev(p.yAt);
+      if (!Number.isFinite(X) || !Number.isFinite(Y)) return null;
+      const cx = sx(X), cy = sy(Y), r = p.size || 5, color = p.color || "#e8e3d9";
+      return <g key={`pt${i}`}>
+        {p.drag ? <circle className="plot-drag" data-control="point" cx={cx} cy={cy} r={r + 9} fill="#f2c14e1f" stroke="#f2c14e" strokeWidth="1.5" strokeDasharray="3 3" {...dragHandlers(p)} /> : null}
+        <circle cx={cx} cy={cy} r={r} fill={color} pointerEvents={p.drag ? "none" : undefined} />
+        {p.label ? <text x={cx + 9 + (p.drag ? 8 : 0)} y={cy - 9} fill={color} fontSize="16" {...HALO} style={font}>{p.label}</text> : null}
+      </g>;
+    })}
     {labels}
+    {params.map((p, i) => <Slider key={p.name} p={p} value={values[p.name]} y={rowsTop + i * SLIDER_ROW + SLIDER_ROW / 2} left={item.x + 6} right={item.x + W - 8} labelWidth={sliderLabelWidth(params)}
+      playing={playing.has(p.name)} onValue={(v) => set(p.name, v)} onPlay={() => togglePlay(p.name)} onGrab={() => stop(p.name)} />)}
   </g>;
 }
 
@@ -770,7 +934,7 @@ function decodeThen(url, live, set) {
   // A malformed SVG (e.g. invalid XML) fails to decode: surface it instead of drawing nothing.
   return img.decode().then(() => { if (live()) set(url); }, () => { throw new Error("invalid SVG: not well-formed XML (unclosed tag, stray & or <?)"); });
 }
-function Artifact({ item }) {
+function Artifact({ item, sig }) {
   const [src, setSrc] = React.useState("");
   const [error, setError] = React.useState("");
   const [natural, setNatural] = React.useState(null);
@@ -787,7 +951,8 @@ function Artifact({ item }) {
     if (item.type === "mermaid") track(mermaid.render(`diagram-${item.id.replace(/[^a-zA-Z0-9_-]/g, "")}`, item.source).then(({ svg }) => { const t = tuneMermaid(svg); return decodeThen(svgUrl(t.svg), live, (url) => ok(url, t.size)); }).catch((e) => fail(`Mermaid: ${e?.message || e}`)));
     return () => { alive = false; };
   }, [item.id, item.type, item.source, item.smiles, item.icon, item.width, item.height]);
-  if (item.type === "plot") return <Plot item={item} />;
+  // A changed plot starts again from its sliders' values.
+  if (item.type === "plot") return <Plot key={sig} item={item} />;
   if (error) return <g data-render-error={error}>
     <rect x={item.x} y={item.y} width={item.width} height={Math.min(item.height, 70)} fill="#ef6f6c22" stroke="#ef6f6c" strokeDasharray="6 4" />
     <text x={item.x + 12} y={item.y + 28} fill="#ef6f6c" fontSize="16" style={{ fontFamily: FONTS.sans }}>{item.type} artifact failed to render</text>
@@ -913,9 +1078,11 @@ let refDrag = false; // a drag is panning the board: no label
 let refShown = false, refFrame = 0, copyTimer = 0, toastTimer = 0;
 function itemRef(g) {
   const step = Number(g.dataset.step);
-  return { id: g.dataset.id, step: Number.isInteger(step) && step > 0 ? step : null, chapter: g.dataset.chapter || null };
+  // A plot with sliders adds the values the learner has set: "step 3, p1 (chapter c) with a = 1.50".
+  const params = g.querySelector(":scope > .plot")?.dataset.params || null;
+  return { id: g.dataset.id, step: Number.isInteger(step) && step > 0 ? step : null, chapter: g.dataset.chapter || null, params };
 }
-const refText = (r) => `${r.step ? `step ${r.step}, ` : ""}${r.id}${r.chapter ? ` (chapter ${r.chapter})` : ""}`;
+const refText = (r) => `${r.step ? `step ${r.step}, ` : ""}${r.id}${r.chapter ? ` (chapter ${r.chapter})` : ""}${r.params ? ` with ${r.params}` : ""}`;
 function segDist(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
   const t = l2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0;
@@ -997,8 +1164,8 @@ function refClick(e) {
   if (!REFS || e.detail > 1) return; // the second click of a double-click means Follow
   const hit = pickItem(e.clientX, e.clientY);
   if (!hit) return;
-  const text = refText(itemRef(hit.g));
-  copyTimer = setTimeout(() => { copyTimer = 0; copyRef(text); }, COPY_DELAY);
+  // The reference is read when it is copied, so it has the slider values on screen by then.
+  copyTimer = setTimeout(() => { copyTimer = 0; copyRef(refText(itemRef(hit.g))); }, COPY_DELAY);
 }
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through */ }

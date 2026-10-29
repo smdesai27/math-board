@@ -301,3 +301,41 @@ test("chapters: a given x or y is kept, overlaps are reported", () => {
   assert.match(r.warnings[0], /chapters "d" \(600,200 1200x800\) and "a" \(0,0 1200x800\) overlap/);
   assert.ok(r.touched.includes("d"));
 });
+
+test("plot sliders: params are checked, usable in expressions and coordinates, and listed by board_read", async () => {
+  const { summarizeBoard } = await import("../tools.mjs");
+  const plot = (fields) => ({ scene: { mode: "append", artifacts: [{ type: "plot", id: "p", ...fields }] } });
+  const ok = applyUpdate(emptyBoard(), plot({
+    params: [{ name: "w", min: 0.5, max: 6, value: 9, step: 0.5, label: "ω" }, { name: "T2", min: 1, max: 8, period: 100 }],
+    functions: [{ expr: "exp(-x/T2) cos(w x)" }],
+    areas: [{ expr: "sin(w x)", from: 0, to: "T2" }],
+    points: [{ x: "T2", y: "exp(-1)", drag: true }, { x: 1, y: 2 }],
+    vlines: [{ x: "w" }],
+    hlines: [{ y: "1/T2" }],
+  })).scene.artifacts[0];
+  assert.deepEqual(ok.params, [
+    { name: "w", min: 0.5, max: 6, value: 6, step: 0.5, label: "ω" }, // value clamped into the range
+    { name: "T2", min: 1, max: 8, value: 1, period: 60 }, // value defaults to min; period clamped
+  ]);
+  assert.deepEqual([ok.areas[0].to, ok.points[0].x, ok.points[0].drag, ok.points[1].x, ok.vlines[0].x, ok.hlines[0].y], ["T2", "T2", true, 1, "w", "1/T2"]);
+  // A plot without sliders is stored as before (no params key).
+  assert.equal("params" in applyUpdate(emptyBoard(), plot({ functions: [{ expr: "x" }] })).scene.artifacts[0], false);
+  const bad = (fields, re) => assert.throws(() => applyUpdate(emptyBoard(), plot(fields)), re);
+  const f = [{ expr: "a x" }];
+  for (const name of ["x", "t", "e", "pi", "sin", "2a", "a b", "", 3]) bad({ params: [{ name, min: 0, max: 1 }], functions: f }, /params\[0\]\.name must be a short name/);
+  bad({ params: [{ name: "a", min: 1, max: 1 }], functions: f }, /"a": min and max must be numbers with min < max/);
+  bad({ params: [{ name: "a", min: 0 }], functions: f }, /min and max must be numbers/);
+  bad({ params: [{ name: "a", min: 0, max: 1, step: 2 }], functions: f }, /step must be more than 0 and at most max - min/);
+  bad({ params: [{ name: "a", min: 0, max: 1, speed: 2 }], functions: f }, /params\[0\]: unknown field "speed"/);
+  bad({ params: [{ name: "a", min: 0, max: 1 }, { name: "a", min: 0, max: 2 }], functions: f }, /"a" is used twice/);
+  bad({ params: Array.from({ length: 7 }, (_, i) => ({ name: `a${i}`, min: 0, max: 1 })), functions: [{ expr: "x" }] }, /params: at most 6/);
+  bad({ functions: f }, /unknown name "a"/);
+  bad({ params: [{ name: "a", min: 0, max: 1 }], functions: [{ expr: "b x" }] }, /unknown name "b"/);
+  bad({ points: [{ x: "1", y: 2 }] }, /points\[0\]\.x must be a number \(an expression such as "a" needs params on the plot\)/);
+  bad({ params: [{ name: "a", min: 0, max: 1 }], points: [{ x: "x", y: 2 }] }, /points\[0\]\.x: "x": unknown name "x"/);
+  bad({ params: [{ name: "a", min: 0, max: 1 }], points: [{ x: "a+1", y: 2, drag: true }] }, /drag needs x or y to be a slider name/);
+  // Old saves load leniently: a bad step is dropped, not fatal.
+  const lenient = applyUpdate(emptyBoard(), plot({ params: [{ name: "a", min: 0, max: 1, step: -1 }], functions: f }), { strict: false });
+  assert.deepEqual(lenient.scene.artifacts[0].params, [{ name: "a", min: 0, max: 1, value: 0 }]);
+  assert.match(summarizeBoard(applyUpdate(emptyBoard(), plot({ params: [{ name: "w", min: 0, max: 6, value: 3 }], functions: [{ expr: "sin(w x)" }] }))), /\[p\] plot at \(0,0\) 360x280 sliders: w=3 in \[0, 6\]/);
+});

@@ -5,6 +5,7 @@
 **The board**
 
 - The controls moved into one pill at the top centre: lesson, chapter, step and a connection dot at rest, the controls below it on hover, focus or tap, and Save, Clear and the shortcut list behind ⋯ (or `?`). The old full-width header and the top-right button row are gone.
+- Sliders on plots: `params` (up to six, with `min`, `max`, `value`, `step`, `label`, `period`) add slider rows the learner drags or plays, and every expression, point, line and area end of the plot can use them. A point with `drag: true` moves the slider it is bound to. `board_read` lists sliders, and a copied reference includes the learner's values. The teaching text suggests a slider when the lesson is how something changes with a parameter.
 
 ## 0.3.0 (2026-10-27)
 
