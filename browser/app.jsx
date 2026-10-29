@@ -12,7 +12,18 @@ import SmilesDrawer from "smiles-drawer";
 const $ = (id) => document.getElementById(id);
 const hash = new URLSearchParams(location.hash.slice(1));
 const sessionToken = hash.get("token");
-const status = (text) => { $("conn").textContent = text; };
+const bar = $("bar");
+let noteTimer = 0;
+/**
+ * The status line in the bar. Routine text ("Connected · revision 4") shows only in its open menu;
+ * a note (the result of Save or Clear, an error) shows on the pill itself for a while.
+ */
+function status(text, note = false) {
+  $("conn").textContent = text;
+  clearTimeout(noteTimer);
+  bar.classList.toggle("note", note);
+  if (note) noteTimer = setTimeout(() => bar.classList.remove("note"), 6000);
+}
 async function request(path, body) {
   let response;
   try {
@@ -418,6 +429,8 @@ function installNavigation() {
     else if (e.key === "End") goLive();
     else if (e.key === "r") replayChapter();
     else if (e.key === " ") togglePlay();
+    else if (e.key === "?") { openBar(true); showMore(true); }
+    else if (e.key === "Escape") openBar(false);
     else if (e.key.startsWith("Arrow")) {
       manual();
       const step = 80;
@@ -1028,8 +1041,48 @@ function render(data) {
   onRendered(data.board, first);
   scheduleRef();
 }
-const sync = new BoardSync({ request, status, render: (data) => render(data) });
-const guarded = (fn) => (...args) => Promise.resolve().then(() => fn(...args)).catch((e) => status(e.message));
+const sync = new BoardSync({ request, status: (text) => status(text), render: (data) => render(data) });
+const guarded = (fn) => (...args) => Promise.resolve().then(() => fn(...args)).catch((e) => status(e.message, true));
+
+/* ---------- the bar: a quiet pill at rest, the controls below it on hover, focus or tap ---------- */
+// Its width follows its content (the pill's line when closed, the wider of that and the controls
+// when open), set in px so the change can animate.
+function sizeBar() {
+  const top = $("bar-top").offsetWidth, inner = $("bar-inner").offsetWidth;
+  bar.style.width = `${Math.ceil((bar.classList.contains("open") ? Math.max(top, inner) : top) + 1)}px`;
+}
+let barTimer = 0, barPointer = "mouse";
+function openBar(open) {
+  clearTimeout(barTimer);
+  if (!open) showMore(false);
+  if (bar.classList.contains("open") === open) return;
+  bar.classList.toggle("open", open);
+  sizeBar();
+}
+function showMore(on) {
+  bar.classList.toggle("more", on);
+  $("btn-more").setAttribute("aria-expanded", String(on));
+}
+function installBar() {
+  const ro = new ResizeObserver(sizeBar);
+  ro.observe($("bar-top"));
+  ro.observe($("bar-inner"));
+  sizeBar();
+  requestAnimationFrame(() => bar.classList.add("sized")); // no width animation on page load
+  // A mouse or pen opens it by hovering; a finger taps the pill (and anywhere else to close it).
+  bar.addEventListener("pointerdown", (e) => { barPointer = e.pointerType; });
+  bar.addEventListener("pointerenter", (e) => { if (e.pointerType !== "touch") openBar(true); });
+  bar.addEventListener("pointerleave", (e) => {
+    if (e.pointerType === "touch" || bar.contains(document.activeElement)) return;
+    clearTimeout(barTimer);
+    barTimer = setTimeout(() => openBar(false), 400);
+  });
+  $("bar-top").addEventListener("click", () => { if (barPointer === "touch") openBar(!bar.classList.contains("open")); });
+  document.addEventListener("pointerdown", (e) => { if (!bar.contains(e.target)) openBar(false); }, true);
+  bar.addEventListener("focusin", () => openBar(true));
+  bar.addEventListener("focusout", (e) => { if (!bar.contains(e.relatedTarget) && !bar.matches(":hover")) openBar(false); });
+  $("btn-more").onclick = () => showMore(!bar.classList.contains("more"));
+}
 /** One quiet banner for what the learner must act on (today: the board server stopped). */
 function notice(text) {
   $("notice-message").textContent = text || "";
@@ -1047,12 +1100,13 @@ async function confirmedWrite(path, body, { ask, again }) {
     if (r.ok) return r.data;
     await nextPaint(); // let the changed board show before the question blocks the page
     if (!confirm(`The board changed in the meantime (it is now at revision ${r.revision}). ${again}`)) {
-      status(`Not done: the board changed · revision ${r.revision}`);
+      status(`Not done: the board changed · revision ${r.revision}`, true);
       return null;
     }
   }
 }
 installNavigation();
+installBar();
 $("btn-prev").onclick = () => goChapter(-1);
 $("btn-next").onclick = () => goChapter(1);
 $("btn-overview").onclick = () => { manual(); animateTo(overviewView(lastData?.board)); };
@@ -1070,12 +1124,13 @@ $("btn-clear").onclick = guarded(() => confirmedWrite("/api/update", { clear: ["
 }));
 $("btn-save").onclick = guarded(async () => {
   const r = await confirmedWrite("/api/save", { name: "default" }, { again: "Save the board as it is now?" });
-  if (r) status(`Saved · revision ${r.saved.revision}`);
+  if (r) status(`Saved · revision ${r.saved.revision}`, true);
 });
 
 /* ---------- connection ---------- */
 const STOPPED_NOTICE = "The board server stopped; reopen it with /board (or board_open).";
 function onConnection(state) {
+  bar.dataset.conn = state;
   if (state === "connected") {
     notice("");
     status(sync.revision >= 0 ? `Connected · revision ${sync.revision}` : "Connected");
@@ -1093,16 +1148,16 @@ function connect() {
     onState: onConnection,
     // The first event after an outage may come from a restarted server: show its board as it is.
     onEvent: (d, { resync }) => {
-      if (Number.isSafeInteger(d.revision)) (resync ? sync.resync(d.revision) : sync.remote(d.revision)).catch((e) => status(e.message));
+      if (Number.isSafeInteger(d.revision)) (resync ? sync.resync(d.revision) : sync.remote(d.revision)).catch((e) => status(e.message, true));
     },
   }).start();
 }
 async function start() {
   if (!/^[a-f0-9]{64}$/.test(sessionToken || "")) throw Error("Missing session token: open the board with /board (or board_open).");
   // If the server is not reachable, the event stream retries and reports it.
-  await sync.refresh().catch((e) => status(e.message));
+  await sync.refresh().catch((e) => status(e.message, true));
   connect();
   window.addEventListener("pagehide", () => { live?.close(); live = null; });
-  window.addEventListener("pageshow", (e) => { if (e.persisted) { connect(); sync.refresh().catch((err) => status(err.message)); } });
+  window.addEventListener("pageshow", (e) => { if (e.persisted) { connect(); sync.refresh().catch((err) => status(err.message, true)); } });
 }
-start().catch((e) => status(e.message));
+start().catch((e) => status(e.message, true));

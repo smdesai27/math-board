@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**The board**
+
+- The controls moved into one pill at the top centre: lesson, chapter, step and a connection dot at rest, the controls below it on hover, focus or tap, and Save, Clear and the shortcut list behind ⋯ (or `?`). The old full-width header and the top-right button row are gone.
+
 ## 0.3.0 (2026-10-27)
 
 The first public release. Everything before it was unreleased and were never released.

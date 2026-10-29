@@ -6,8 +6,30 @@
 </head>
 <body>
 <div id="surface" aria-label="Blackboard"></div>
-<header><strong>Blackboard</strong><span id="board-title"></span><span id="conn" role="status">Connecting…</span></header>
-<nav aria-label="Board controls"><span id="nav-hint">scroll/drag pan · ⌘/ctrl+scroll zoom · ←/→ steps · r replay · space play · [ ] chapters · o overview · f follow · click item: copy ref</span><span id="step-indicator"></span><button id="btn-step-back" title="Previous step (←)">◂</button><button id="btn-step-fwd" title="Next step (→)">▸</button><button id="btn-replay" title="Replay this chapter (r)">Replay</button><button id="btn-prev" title="Previous chapter ([)">‹</button><button id="btn-next" title="Next chapter (])">›</button><button id="btn-overview" title="Whole lesson (o)">Overview</button><button id="btn-follow" title="Follow the lesson camera (f, double-click)">Follow</button><button id="btn-clear" title="Clear the whole board (asks first)">Clear</button><button id="btn-save" title="Save the board (as &quot;default&quot;)">Save</button></nav>
+<!-- One small pill at the top: lesson, step and connection at rest; the controls open below it on hover, focus or tap. -->
+<header id="bar" data-conn="connecting">
+<div id="bar-top"><span id="conn-dot" aria-hidden="true"></span><span id="board-title"></span><span id="step-indicator"></span><span id="conn" role="status">Connecting…</span></div>
+<nav id="bar-panel" aria-label="Board controls"><div id="bar-inner">
+<div class="bar-row">
+<div class="bar-group" role="group" aria-label="Steps">
+<button id="btn-step-back" title="Previous step (←)" aria-label="Previous step"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3.5v9"/><path class="fill" d="M12 3.6v8.8L6.3 8z"/></svg></button>
+<button id="btn-step-fwd" title="Next step (→)" aria-label="Next step"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M11.5 3.5v9"/><path class="fill" d="M4 3.6v8.8L9.7 8z"/></svg></button>
+<button id="btn-replay" title="Replay this chapter (r)" aria-label="Replay this chapter"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.3 8.6A4.8 4.8 0 1 0 4.7 4.6"/><path d="M4.4 1.9v2.9h2.9"/></svg></button>
+</div>
+<div class="bar-group" role="group" aria-label="Chapters">
+<button id="btn-prev" title="Previous chapter ([)" aria-label="Previous chapter"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg></button>
+<button id="btn-next" title="Next chapter (])" aria-label="Next chapter"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg></button>
+<button id="btn-overview" title="Whole lesson (o)" aria-label="Whole lesson"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="2.5" width="4.6" height="4.6" rx="1.2"/><rect x="8.9" y="2.5" width="4.6" height="4.6" rx="1.2"/><rect x="2.5" y="8.9" width="4.6" height="4.6" rx="1.2"/><rect x="8.9" y="8.9" width="4.6" height="4.6" rx="1.2"/></svg></button>
+<button id="btn-follow" title="Follow the lesson camera (f, double-click)" aria-label="Follow the lesson"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4.6"/><circle class="fill" cx="8" cy="8" r="1.5"/><path d="M8 1.2v2.2M8 12.6v2.2M1.2 8h2.2M12.6 8h2.2"/></svg></button>
+</div>
+<div class="bar-group"><button id="btn-more" title="Save, clear and shortcuts (?)" aria-label="More" aria-expanded="false" aria-controls="bar-more"><svg viewBox="0 0 16 16" aria-hidden="true"><circle class="fill" cx="3.4" cy="8" r="1.35"/><circle class="fill" cx="8" cy="8" r="1.35"/><circle class="fill" cx="12.6" cy="8" r="1.35"/></svg></button></div>
+</div>
+<div id="bar-more"><div class="bar-more-inner">
+<div class="bar-actions"><button id="btn-save" title="Save the board (as &quot;default&quot;)">Save</button><button id="btn-clear" class="danger" title="Clear the whole board (asks first)">Clear board…</button></div>
+<dl id="nav-hint"><dt>← →</dt><dd>step</dd><dt>space</dt><dd>play</dd><dt>r</dt><dd>replay</dd><dt>[ ]</dt><dd>chapter</dd><dt>o</dt><dd>overview</dd><dt>f</dt><dd>follow</dd><dt>scroll</dt><dd>pan</dd><dt>⌘ scroll</dt><dd>zoom</dd><dt>click</dt><dd>copy an item's ref</dd></dl>
+</div></div>
+</div></nav>
+</header>
 <div id="notice" hidden role="alert"><span id="notice-message"></span></div>
 <div id="item-outline" aria-hidden="true"></div><div id="item-ref" aria-hidden="true"></div><div id="toast" role="status" aria-live="polite"></div>
 </body></html>

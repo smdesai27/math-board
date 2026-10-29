@@ -92,20 +92,70 @@ test("safe math and labels cannot execute HTML or create trusted links", async (
   expect(await page.evaluate(() => window.pwned)).toBeUndefined();
 });
 
-test("quiet controls stay hidden until hover and scene remains view-only", async ({ page }) => {
+test("the bar is a quiet pill until hovered; Save and Clear sit behind its menu", async ({ page }) => {
   await ready(page);
   // Park the pointer outside the viewport first: some headless builds (Linux CI) start it at
-  // (0,0), which already counts as hovering the body and fades the controls in.
+  // (0,0), which is near enough to the bar to count as hovering it.
   await page.mouse.move(-1, -1);
-  await expect(page.locator("nav")).toHaveCSS("opacity", "0");
-  await page.locator("body").hover();
+  // The width the bar is set to (it animates there).
+  const width = () => page.locator("#bar").evaluate((el) => parseFloat(el.style.width));
+  await expect(page.locator("#bar-top")).toBeVisible();
+  await expect(page.locator("#btn-step-back")).toBeHidden();
+  await expect(page.locator("#btn-save")).toBeHidden();
+  // Connected and nothing to report: the closed pill shows no status text.
+  await expect(page.locator("#bar")).toHaveAttribute("data-conn", "connected");
+  await expect(page.locator("#conn")).toBeHidden();
+  const closed = await width();
+  await page.locator("#bar").hover();
+  await expect(page.locator("#btn-step-back")).toBeVisible();
+  await expect(page.locator("#btn-follow")).toBeVisible();
+  await expect(page.locator("#conn")).toBeHidden(); // routine status: only in the menu
+  await expect(page.locator("#btn-save")).toBeHidden();
+  await expect.poll(width).toBeGreaterThan(closed + 40);
+  await page.click("#btn-more");
+  await expect(page.locator("#btn-more")).toHaveAttribute("aria-expanded", "true");
   await expect(page.locator("#btn-save")).toBeVisible();
-  await expect(page.locator("nav")).toHaveCSS("opacity", "0.86");
+  await expect(page.locator("#btn-clear")).toBeVisible();
+  await expect(page.locator("#nav-hint")).toContainText("overview");
+  await expect(page.locator("#conn")).toHaveText(`Connected · revision ${server.revision}`);
+  await expect(page.locator("#conn")).toBeVisible();
   await page.mouse.move(-1, -1);
-  await expect(page.locator("nav")).toHaveCSS("opacity", "0");
+  await expect(page.locator("#btn-step-back")).toBeHidden();
+  await expect(page.locator("#btn-more")).toHaveAttribute("aria-expanded", "false");
+  await expect.poll(width).toBeLessThan(closed + 2);
+  // The keyboard reaches the same menu: ? opens it, Escape closes it.
+  await page.keyboard.press("?");
+  await expect(page.locator("#btn-save")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#btn-save")).toBeHidden();
   server.update({ baseRevision: server.revision, title: "Changed remotely" });
   await expect(page.locator("#board-title")).toHaveText("Changed remotely");
+  await expect.poll(width).toBeGreaterThan(closed);
 });
+
+test("on a touch screen a tap opens the bar and a tap on the board closes it", async ({ browser }) => {
+  const context = await browser.newContext({ hasTouch: true });
+  const page = await context.newPage();
+  try {
+    await ready(page);
+    await expect(page.locator("#btn-step-back")).toBeHidden();
+    await page.locator("#bar-top").tap();
+    await expect(page.locator("#btn-step-back")).toBeVisible();
+    await page.locator("#btn-overview").tap();
+    await expect(page.locator("#btn-step-back")).toBeVisible(); // a control does not close it
+    await page.touchscreen.tap(600, 600);
+    await expect(page.locator("#btn-step-back")).toBeHidden();
+  } finally {
+    await context.close();
+  }
+});
+
+/** Open the bar's menu and press one of its buttons (Save, Clear). */
+async function menuClick(page, id) {
+  await page.locator("#bar").hover();
+  await page.click("#btn-more");
+  await page.click(id);
+}
 
 test("step playback: rapid updates all animate, space replays, arrows step, End goes live", async ({ page }) => {
   const errors = [];
@@ -138,7 +188,7 @@ test("step playback: rapid updates all animate, space replays, arrows step, End 
   expect(await hidden()).toEqual([]);
   expect(await indicator()).toBe("step 4 / 4");
   // Clicking a nav button must not steal Space.
-  await page.hover("nav");
+  await page.locator("#bar").hover();
   await page.click("#btn-overview");
   await page.keyboard.press(" ");
   await expect.poll(async () => (await hidden()).length).toBeGreaterThan(0);
@@ -257,8 +307,7 @@ test("Clear asks again when the tutor drew while the question was open; the view
     if (dialogs.length === 1) server.update({ equations: [{ op: "add", id: "b", latex: "b = 2", x: 100, y: 300 }] });
     await d.accept();
   });
-  await page.hover("nav");
-  await page.click("#btn-clear");
+  await menuClick(page, "#btn-clear");
   await expect.poll(() => dialogs.length).toBe(2);
   expect(dialogs[0]).toBe("Clear the whole board? (Save first if you want to keep it.)");
   expect(dialogs[1]).toBe("The board changed in the meantime (it is now at revision 2). Clear the whole board as it is now?");
@@ -282,8 +331,7 @@ test("declining the second Clear question keeps the board, and later updates sti
       await d.accept();
     } else await d.dismiss();
   });
-  await page.hover("nav");
-  await page.click("#btn-clear");
+  await menuClick(page, "#btn-clear");
   await expect(page.locator("#conn")).toHaveText(`Not done: the board changed · revision ${server.revision}`);
   await expect(page.locator("#blackboard .katex")).toHaveCount(2); // the board the learner was asked about
   expect(server.getState().equations.map((e) => e.id)).toEqual(["a", "b"]);
@@ -295,8 +343,7 @@ test("Save writes the board the learner sees and says so", async ({ page }) => {
   await ready(page);
   server.update({ title: "To keep", equations: [{ op: "add", id: "a", latex: "a = 1", x: 100, y: 100 }] });
   await expect(page.locator("#board-title")).toHaveText("To keep");
-  await page.hover("nav");
-  await page.click("#btn-save");
+  await menuClick(page, "#btn-save");
   await expect(page.locator("#conn")).toHaveText(`Saved · revision ${server.revision}`);
   expect((await server.listSaves()).map((s) => s.name ?? s)).toContain("default");
 });
