@@ -271,6 +271,8 @@ export const BOARD_DOCS = Object.freeze({
     "Checks: a new or changed html artifact is loaded first in the headless layout check, and the learner sees it only if it was ready there within 8 s. " +
       "Script errors (with the line in your source), blocked requests, navigation and a frame that never got ready are reported like a failed artifact: fix and resend.",
     "It draws above the board's other items and takes the pointer and wheel inside its box, so give it its own space. Snapshots and exports show it just after loading.",
+    "The layout check measures an html artifact as one box: it can't see overlaps or clipped text inside it, so look at a board_snapshot of its chapter after drawing one. " +
+      "A snapshot can't click or drag either: keep controls simple, and ask the learner to try them.",
     ARTIFACT_COMMON,
     "Example: " + JSON.stringify({
       type: "html", id: "bloch", x: 60, y: 100, width: 560, height: 480, libs: ["three"],
@@ -923,12 +925,17 @@ export const handlers = Object.freeze({
     if (!region && params.overview && board.chapters?.length) region = overviewRegion(board.chapters);
     region ??= cameraRect(board);
     const shot = await s.snapshots.capture({ region, width: params.width, signal: ctx.signal });
-    const { items, issues } = shot.lint;
+    const { items: all, issues } = shot.lint;
+    // Only the items this snapshot shows (a chapter's snapshot lists that chapter, not the board).
+    const items = all.filter((i) => i.x < region.x + region.w && i.x + i.w > region.x && i.y < region.y + region.h && i.y + i.h > region.y);
+    const elsewhere = all.length - items.length;
     const text = [
       ctx.staleWarning(),
       `Snapshot of revision ${s.revision} (board region ${Math.round(region.x)},${Math.round(region.y)} ${Math.round(region.w)}x${Math.round(region.h)}). Measured boxes are in board coordinates; a chapter item's local coords = board coords minus the chapter origin.`,
       issues.length ? `layout warnings (${issues.length}):\n${issues.slice(0, 40).map((i) => `  - ${i}`).join("\n")}${issues.length > 40 ? `\n  ... ${issues.length - 40} more` : ""}` : "layout check: no overlaps or off-board items.",
-      items.length ? `measured boxes:\n${items.slice(0, 120).map((i) => `  [${i.id}] ${i.kind} ${i.x},${i.y} ${i.w}x${i.h}`).join("\n")}` : "board is empty.",
+      items.length
+        ? `measured boxes in this region:\n${items.slice(0, 120).map((i) => `  [${i.id}] ${i.kind} ${i.x},${i.y} ${i.w}x${i.h}`).join("\n")}${elsewhere ? `\n(${elsewhere} more outside this region; snapshot their chapter for theirs)` : ""}`
+        : all.length ? `nothing in this region (${all.length} items elsewhere on the board).` : "board is empty.",
       ...snapshotNotes(s),
     ].filter(Boolean).join("\n");
     return {
