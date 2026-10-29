@@ -518,10 +518,12 @@ function sanitizeParam(p, pr, i, strict) {
   const name = typeof p.name === "string" ? p.name.trim() : "";
   if (!PARAM_NAME.test(name) || RESERVED_PARAM_NAMES.has(name))
     fail(`${at}.name must be a short name such as "a" or "omega" (a letter, then letters, digits or _; not x, t, a constant or a function name), got ${show(p.name)}`);
-  const min = p.min, max = p.max;
-  if (!(typeof min === "number" && typeof max === "number" && Number.isFinite(min) && Number.isFinite(max) && max - min > 1e-9 * Math.max(1, Math.abs(min), Math.abs(max))))
-    fail(`${at} "${name}": min and max must be numbers with min < max`);
-  const out = { name, min: NUMBER(min), max: NUMBER(max) };
+  const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+  // Clamped like every coordinate (±1e6) before they are compared, so the range stored is the one checked.
+  const min = isNum(p.min) ? NUMBER(p.min) : NaN, max = isNum(p.max) ? NUMBER(p.max) : NaN;
+  if (!(max - min > 1e-9 * Math.max(1, Math.abs(min), Math.abs(max))))
+    fail(`${at} "${name}": min and max must be numbers within ±1e6 with min < max`);
+  const out = { name, min, max };
   out.value = clamp(pr.num("value", out.min), out.min, out.max);
   const step = pr.num("step");
   if (step !== undefined) {
@@ -535,7 +537,7 @@ function sanitizeParam(p, pr, i, strict) {
   return out;
 }
 /** Declarative function plot. Expressions are parsed by shared/expr.mjs (no eval). */
-function sanitizePlot(raw, strict, where) {
+function sanitizePlot(raw, strict, where, height) {
   const out = {};
   out.xRange = range(raw.xRange, "xRange", [-10, 10]);
   const yr = range(raw.yRange, "yRange", undefined);
@@ -567,7 +569,13 @@ function sanitizePlot(raw, strict, where) {
   const names = params.map((p) => p.name);
   const twice = names.find((n, i) => names.indexOf(n) !== i);
   if (twice) fail(`plot params: "${twice}" is used twice`);
-  if (params.length) out.params = params;
+  if (params.length) {
+    out.params = params;
+    // Slider rows sit inside the plot's box under the x axis (the page lays it out the same way):
+    // a box too short for them would leave no plot.
+    const need = (out.title ? 34 : 14) + (out.yLabel ? 24 : 0) + 34 + 34 * params.length + 80;
+    if (strict && height < need) fail(`plot: ${params.length} slider${params.length > 1 ? "s" : ""} need a height of at least ${need} (each slider row takes 34 px under the plot); it is ${height}`);
+  }
   // Every expression may use the sliders; a coordinate (point, line, area end) may be an
   // expression of them instead of a number when the plot has sliders.
   const vars = (v) => [v, ...names];
@@ -630,7 +638,7 @@ export function sanitizeArtifact(raw, { strict = false, keys: checkKeys = strict
     width: clamp(r.num("width", 0) || 360, 80, 1200),
     height: clamp(r.num("height", 0) || 280, 60, 800),
   };
-  if (raw.type === "plot") Object.assign(out, sanitizePlot(raw, strict, where));
+  if (raw.type === "plot") Object.assign(out, sanitizePlot(raw, strict, where, out.height));
   else if (raw.type === "html") {
     if (!html) fail(`${where}: ${HTML_OFF}`);
     if (typeof raw.source !== "string" || !raw.source.trim()) fail(`${where}: html needs source: the inside of <body> (elements, <style> and classic <script>)`);

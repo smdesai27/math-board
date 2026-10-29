@@ -13,16 +13,22 @@ const $ = (id) => document.getElementById(id);
 const hash = new URLSearchParams(location.hash.slice(1));
 const sessionToken = hash.get("token");
 const bar = $("bar");
-let noteTimer = 0;
+let noteTimer = 0, noteShowing = false, routineStatus = "";
 /**
  * The status line in the bar. Routine text ("Connected · revision 4") shows only in its open menu;
- * a note (the result of Save or Clear, an error) shows on the pill itself for a while.
+ * a note (the result of Save or Clear, an error) shows on the pill itself for 6 s, and routine
+ * updates meanwhile (the board re-rendering) wait for it. `force` (a lost connection) replaces it.
  */
-function status(text, note = false) {
+function status(text, note = false, force = false) {
+  if (!note) {
+    routineStatus = text;
+    if (noteShowing && !force) return;
+  }
   $("conn").textContent = text;
   clearTimeout(noteTimer);
+  noteShowing = note;
   bar.classList.toggle("note", note);
-  if (note) noteTimer = setTimeout(() => bar.classList.remove("note"), 6000);
+  if (note) noteTimer = setTimeout(() => { noteShowing = false; bar.classList.remove("note"); $("conn").textContent = routineStatus; }, 6000);
 }
 async function request(path, body) {
   let response;
@@ -623,9 +629,12 @@ function snapParam(p, v) {
   if (p.step) out = Math.min(p.max, p.min + Math.round((out - p.min) / p.step) * p.step);
   return out;
 }
+/** Decimal places of a number as written: 0.25 -> 2, 2.5 -> 1, 1e-7 -> 7. */
+const decimals = (v) => { const [m, e] = String(v).split("e"); return Math.max(0, (m.split(".")[1]?.length ?? 0) - Number(e ?? 0)); };
 function fmtParam(p, v) {
   const unit = p.step || (p.max - p.min) / 100;
-  const d = Math.max(0, Math.min(6, -Math.floor(Math.log10(unit) + 1e-9)));
+  // With a step every value is min + k * step, so show exactly the decimals those have.
+  const d = Math.min(6, p.step ? Math.max(decimals(p.step), decimals(p.min)) : Math.max(0, -Math.floor(Math.log10(unit) + 1e-9)));
   return (Math.abs(v) < unit / 1e6 ? 0 : v).toFixed(d).replace("-", "−");
 }
 /**
@@ -1457,9 +1466,9 @@ function onConnection(state) {
   if (state === "connected") {
     notice("");
     status(sync.revision >= 0 ? `Connected · revision ${sync.revision}` : "Connected");
-  } else if (state === "reconnecting") status("Connection lost · reconnecting…");
+  } else if (state === "reconnecting") status("Connection lost · reconnecting…", false, true);
   else if (state === "stopped") {
-    status("Board server stopped");
+    status("Board server stopped", false, true);
     notice(STOPPED_NOTICE);
   }
 }

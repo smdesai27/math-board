@@ -192,7 +192,7 @@ export const BOARD_DOCS = Object.freeze({
       "Each is a row under the plot that the learner drags, or plays with its ▶ button (min to max and back), and the plot redraws live. " +
       "A name (\"a\", \"omega\"; not x, t, a constant or a function) can be used in every expression of the plot, and as a point, vline or hline coordinate " +
       "or an area's from/to: {x:\"a\", y:\"sin(a)\"}, {expr:\"sin(x)\", from:0, to:\"a\"}. A point with drag:true whose x and/or y is just a slider name can be dragged, " +
-      "which moves that slider. Each slider takes ~34 px of the plot's height. The fitted y range covers every slider's ends, or give yRange. " +
+      "which moves that slider. Each slider row takes 34 px of the plot's height (a height too small to leave a plot is rejected with the size needed). The fitted y range covers every slider's ends, or give yRange. " +
       "Snapshots, other tabs and board_read show each slider at its value; when the learner clicks the plot, the reference they copy includes their values.",
     "Expressions: numbers, the variable x (t in parametric), + - * / ^ (or **), unary minus, parentheses, implicit multiplication (2x, 3(x+1), 2pi), " +
       "constants pi, e, tau, and the functions sin cos tan asin acos atan sinh cosh tanh asinh acosh atanh sec csc cot exp ln log (base 10) log2 log10 " +

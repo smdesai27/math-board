@@ -323,8 +323,11 @@ test("plot sliders: params are checked, usable in expressions and coordinates, a
   const bad = (fields, re) => assert.throws(() => applyUpdate(emptyBoard(), plot(fields)), re);
   const f = [{ expr: "a x" }];
   for (const name of ["x", "t", "e", "pi", "sin", "2a", "a b", "", 3]) bad({ params: [{ name, min: 0, max: 1 }], functions: f }, /params\[0\]\.name must be a short name/);
-  bad({ params: [{ name: "a", min: 1, max: 1 }], functions: f }, /"a": min and max must be numbers with min < max/);
+  bad({ params: [{ name: "a", min: 1, max: 1 }], functions: f }, /"a": min and max must be numbers within ±1e6 with min < max/);
   bad({ params: [{ name: "a", min: 0 }], functions: f }, /min and max must be numbers/);
+  bad({ params: [{ name: "a", min: 2e6, max: 3e6 }], functions: f }, /"a": min and max must be numbers within ±1e6 with min < max/);
+  bad({ height: 200, params: Array.from({ length: 4 }, (_, i) => ({ name: `a${i}`, min: 0, max: 1 })), functions: [{ expr: "x" }] }, /plot: 4 sliders need a height of at least 264 \(each slider row takes 34 px under the plot\); it is 200/);
+  assert.equal(applyUpdate(emptyBoard(), plot({ height: 264, params: Array.from({ length: 4 }, (_, i) => ({ name: `a${i}`, min: 0, max: 1 })), functions: [{ expr: "x" }] })).scene.artifacts[0].params.length, 4);
   bad({ params: [{ name: "a", min: 0, max: 1, step: 2 }], functions: f }, /step must be more than 0 and at most max - min/);
   bad({ params: [{ name: "a", min: 0, max: 1, speed: 2 }], functions: f }, /params\[0\]: unknown field "speed"/);
   bad({ params: [{ name: "a", min: 0, max: 1 }, { name: "a", min: 0, max: 2 }], functions: f }, /"a" is used twice/);
