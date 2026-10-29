@@ -133,6 +133,17 @@ test("the bar is a quiet pill until hovered; Save and Clear sit behind its menu"
   await expect.poll(width).toBeGreaterThan(closed);
 });
 
+test("the open bar stays usable while the server-stopped notice is shown", async ({ page }) => {
+  await ready(page);
+  await page.evaluate(() => { document.getElementById("notice-message").textContent = "The board server stopped; reopen it with /board (or board_open)."; document.getElementById("notice").hidden = false; });
+  await page.locator("#bar").hover();
+  await expect(page.locator("#btn-step-back")).toBeVisible();
+  for (const id of ["btn-step-back", "btn-replay", "btn-overview", "btn-follow", "btn-more"]) {
+    // Polled: the panel animates open.
+    await expect.poll(() => page.evaluate((id) => { const r = document.getElementById(id).getBoundingClientRect(); return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest("button")?.id; }, id), { message: id }).toBe(id);
+  }
+});
+
 test("on a touch screen a tap opens the bar and a tap on the board closes it", async ({ browser }) => {
   const context = await browser.newContext({ hasTouch: true });
   const page = await context.newPage();
@@ -345,6 +356,13 @@ test("Save writes the board the learner sees and says so", async ({ page }) => {
   await expect(page.locator("#board-title")).toHaveText("To keep");
   await menuClick(page, "#btn-save");
   await expect(page.locator("#conn")).toHaveText(`Saved · revision ${server.revision}`);
+  // The note stays on the closed pill for its 6 s even when the board changes meanwhile.
+  await page.mouse.move(-1, -1);
+  const saved = `Saved · revision ${server.revision}`;
+  server.update({ baseRevision: server.revision, title: "Drawn right after" });
+  await expect(page.locator("#board-title")).toHaveText("Drawn right after");
+  await expect(page.locator("#conn")).toHaveText(saved);
+  await expect(page.locator("#conn")).toBeVisible();
   expect((await server.listSaves()).map((s) => s.name ?? s)).toContain("default");
 });
 

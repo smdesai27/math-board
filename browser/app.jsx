@@ -13,16 +13,22 @@ const $ = (id) => document.getElementById(id);
 const hash = new URLSearchParams(location.hash.slice(1));
 const sessionToken = hash.get("token");
 const bar = $("bar");
-let noteTimer = 0;
+let noteTimer = 0, noteShowing = false, routineStatus = "";
 /**
  * The status line in the bar. Routine text ("Connected · revision 4") shows only in its open menu;
- * a note (the result of Save or Clear, an error) shows on the pill itself for a while.
+ * a note (the result of Save or Clear, an error) shows on the pill itself for 6 s, and routine
+ * updates meanwhile (the board re-rendering) wait for it. `force` (a lost connection) replaces it.
  */
-function status(text, note = false) {
+function status(text, note = false, force = false) {
+  if (!note) {
+    routineStatus = text;
+    if (noteShowing && !force) return;
+  }
   $("conn").textContent = text;
   clearTimeout(noteTimer);
+  noteShowing = note;
   bar.classList.toggle("note", note);
-  if (note) noteTimer = setTimeout(() => bar.classList.remove("note"), 6000);
+  if (note) noteTimer = setTimeout(() => { noteShowing = false; bar.classList.remove("note"); $("conn").textContent = routineStatus; }, 6000);
 }
 async function request(path, body) {
   let response;
@@ -1134,9 +1140,9 @@ function onConnection(state) {
   if (state === "connected") {
     notice("");
     status(sync.revision >= 0 ? `Connected · revision ${sync.revision}` : "Connected");
-  } else if (state === "reconnecting") status("Connection lost · reconnecting…");
+  } else if (state === "reconnecting") status("Connection lost · reconnecting…", false, true);
   else if (state === "stopped") {
-    status("Board server stopped");
+    status("Board server stopped", false, true);
     notice(STOPPED_NOTICE);
   }
 }
