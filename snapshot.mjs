@@ -30,6 +30,9 @@ const HIDE_CHROME = "header,nav,#conflict{display:none!important}";
 export const SNAPSHOT_HEADER = "x-math-board-snapshot";
 export const LINT_TIMEOUT_MS = 20000;
 export const CAPTURE_TIMEOUT_MS = 30000;
+// How long a call that loads unchecked html artifacts waits for the page: frames get 5 s to
+// report ready (browser side), so a page still busy after this is stuck in one of them.
+export const FRAME_CHECK_READY_MS = 8000;
 /** Change stamp of the browser assets, so a rebuilt frontend reloads the headless page. */
 function assetStamp() {
   return ["index.html", "app.js", "app.css", "style.css"]
@@ -81,6 +84,14 @@ export async function launchChromium(chromium) {
 }
 
 const abortError = () => Object.assign(new Error("cancelled"), { name: "AbortError" });
+/** `promise`, or a TimeoutError after `ms` (for page calls a busy page would never answer). */
+function withLimit(promise, ms) {
+  let timer;
+  const limit = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error(`Timeout ${ms}ms exceeded`), { name: "TimeoutError" })), ms);
+  });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
 const pageGone = (err) => /Target crashed|crash|has been closed|Target closed|browser has disconnected|Page closed|context or browser has been closed/i.test(String(err?.message));
 
 export class Snapshotter {
@@ -168,13 +179,22 @@ export class Snapshotter {
     return this.launching;
   }
 
-  async waitReady(page, timeout = 10000) {
+  /** Wait for the page to show the current revision, with its async rendering done (and `frame`, an html artifact being checked, loaded or failed). */
+  async waitReady(page, timeout = 10000, frame = null) {
     const revision = this.server.revision;
-    await page.waitForFunction(
-      (rev) => window.__board && window.__board.revision >= rev && window.__board.pending === 0,
-      revision,
+    const wait = page.waitForFunction(
+      ([rev, id]) => window.__board && window.__board.revision >= rev && window.__board.pending === 0 && (!id || window.__board.frameSettled?.(id)),
+      [revision, frame],
       { timeout, polling: 50 },
     );
+    if (!frame) await wait;
+    else {
+      // The frame to check may have been chosen after the page last read the board: read it now.
+      // Playwright's own time limit runs inside the page, which a frame stuck in a loop blocks, so
+      // the limit is enforced here too.
+      wait.catch(() => {});
+      await withLimit(page.evaluate(() => window.__board?.refresh?.()).then(() => wait), timeout);
+    }
     await page.evaluate(async () => {
       await document.fonts.ready;
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -236,25 +256,59 @@ export class Snapshotter {
 
   /** Measured layout issues for the whole board. */
   lint({ timeout = LINT_TIMEOUT_MS, signal } = {}) {
-    return this.run(() => this._lint(Math.min(10000, timeout)), { timeout, signal, label: "layout check" });
+    const checking = this.server.uncheckedFrames?.() ?? [];
+    const ready = checking.length ? FRAME_CHECK_READY_MS : Math.min(10000, timeout);
+    return this.checkFrames(checking, this.run(() => this._lint(ready, checking[0]?.id), { timeout, signal, label: "layout check" }), (r) => r.frames);
   }
   capture({ region, width, timeout = CAPTURE_TIMEOUT_MS, signal } = {}) {
-    return this.run(() => this._capture({ region, width }), { timeout, signal, label: "snapshot" });
+    const checking = this.server.uncheckedFrames?.() ?? [];
+    const ready = checking.length ? FRAME_CHECK_READY_MS : undefined;
+    return this.checkFrames(checking, this.run(() => this._capture({ region, width, ready, frame: checking[0]?.id }), { timeout, signal, label: "snapshot" }), (r) => r.lint?.frames);
+  }
+  /**
+   * A call that loads html artifacts not checked yet is their check: the server learns which
+   * frames loaded (or that the page stopped responding: then the page is thrown away, so the
+   * next call starts clean and never loads that frame again).
+   */
+  checkFrames(checking, call, framesOf) {
+    if (!checking.length) return call;
+    return call.then(
+      (result) => { this.server.frameChecked(checking, framesOf(result)); return result; },
+      (err) => {
+        if (/timed? ?out|Timeout \d+ms exceeded/i.test(String(err?.message))) this.discard();
+        this.server.frameChecked(checking, null, err);
+        throw err;
+      },
+    );
   }
 
-  async _lint(readyTimeout) {
+  async _lint(readyTimeout, frame) {
     const page = await this.ensurePage();
-    await this.waitReady(page, readyTimeout);
-    return page.evaluate((b) => window.__boardLint(b), { x: 0, y: 0, ...BOARD });
+    await this.pauseFrames(page, false);
+    try {
+      await this.waitReady(page, readyTimeout, frame);
+      return await page.evaluate((b) => window.__boardLint(b), { x: 0, y: 0, ...BOARD });
+    } finally {
+      await this.pauseFrames(page, true);
+    }
+  }
+  /**
+   * Between calls the page keeps html artifacts' frames loaded but not rendered (display: none
+   * stops their animation loops), so an idle headless browser costs no CPU.
+   */
+  async pauseFrames(page, paused) {
+    if (!this.server.html || page.isClosed?.()) return;
+    await withLimit(page.evaluate((p) => window.__board?.pauseFrames?.(p), paused), 2000).catch(() => {});
   }
 
   /**
    * Capture the board (or a board-space region, for zooming in on detail).
    * Returns { png: Buffer, lint, region }.
    */
-  async _capture({ region, width } = {}) {
+  async _capture({ region, width, ready, frame } = {}) {
     const page = await this.ensurePage();
-    await this.waitReady(page);
+    await this.pauseFrames(page, false);
+    await this.waitReady(page, ready, frame);
     const r = region ?? { x: 0, y: 0, ...BOARD };
     const w = Math.round(Math.max(200, Math.min(2400, width ?? BOARD.w)));
     const h = Math.round(Math.max(100, Math.min(2400, (w * r.h) / r.w)));
@@ -270,6 +324,7 @@ export class Snapshotter {
       const lint = await page.evaluate((b) => window.__boardLint(b), { x: 0, y: 0, ...BOARD });
       return { png, lint, region: r };
     } finally {
+      await this.pauseFrames(page, true);
       if (!page.isClosed() && (region || w !== BOARD.w)) {
         await page.setViewportSize({ width: BOARD.w, height: BOARD.h }).catch(() => {});
         if (region) await page.evaluate((b) => window.__setView(0, 0, b.w, b.h), BOARD).catch(() => {});

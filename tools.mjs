@@ -87,6 +87,7 @@ export const DOC_TOPICS = Object.freeze([
   "mermaid",
   "molecule",
   "icon",
+  "html",
   "animation",
   "layout",
   "saves",
@@ -111,6 +112,7 @@ export const BOARD_DOCS = Object.freeze({
     "- mermaid: flowcharts, sequence, state, class and ER diagrams, mind maps, timelines (automatic layout)",
     "- molecule: 2D structures from SMILES",
     "- icon: anatomy, organs, cells, microbes, viruses, DNA, plants, animals, lab equipment",
+    "- html: your own HTML and JavaScript in a sandbox (3D scenes, simulations), only on boards started with MATH_BOARD_HTML=1",
     "Style (black board, chalk colors; keep it consistent): chalk white #e8e3d9 for main lines and text, muted #8a8578 for axes and guides; " +
       "accents yellow #f2c14e, blue #5fb3d9, red #ef6f6c, green #8de0be, purple #c39bd3; at most 3-4 accents per diagram.",
     "Other topics: workflow, chapters, animation, layout, saves.",
@@ -251,6 +253,33 @@ export const BOARD_DOCS = Object.freeze({
     ARTIFACT_COMMON,
     'Example: {"type":"icon","id":"heart","icon":"heart-cross-section-2","x":700,"y":100,"width":260,"card":true,"label":"Heart"}',
     "CC-BY icons need attribution if the material is published (public/icons/CREDITS.md).",
+  ].join("\n"),
+
+  html: [
+    "{type:\"html\", x, y, width, height, source, libs?}: your own HTML and JavaScript, for what a plot (with params for sliders), svg or " +
+      "mermaid cannot show: a 3D scene the learner turns (a Bloch sphere, field lines), a simulation, a custom interactive diagram. " +
+      "Use plot params when a slider on a curve is enough: they cost far fewer tokens.",
+    "Only on boards the learner started with MATH_BOARD_HTML=1; elsewhere an html artifact is rejected.",
+    "source: the inside of <body> (elements, <style>, classic <script>), at most 64 KiB. It runs in a sandboxed frame of exactly width x height CSS px " +
+      "over the black board: transparent background, chalk text, serif font.",
+    "libs (loaded before your source): three (window.THREE, with THREE.OrbitControls), d3 (window.d3), matter (window.Matter: 2D physics), " +
+      "lil-gui (window.lil.GUI: slider panels), fft (window.FFT: fft.js), katex (window.katex, with \\ce; its CSS too).",
+    "window.board: width, height, colors {chalk, muted, yellow, blue, red, green, purple, background}, font. The frame counts as ready just after load; " +
+      "if it draws later, call board.wait() at the start and board.ready() once drawn.",
+    "The sandbox: nothing from the network (fetch, images, fonts and scripts from URLs are blocked), no access to the board page, cookies or storage, " +
+      "no forms, popups or navigation. Draw with canvas or SVG, or use data: URLs.",
+    "Checks: a new or changed html artifact is loaded first in the headless layout check, and the learner sees it only if it was ready there within 8 s. " +
+      "Script errors (with the line in your source), blocked requests, navigation and a frame that never got ready are reported like a failed artifact: fix and resend.",
+    "It draws above the board's other items and takes the pointer and wheel inside its box, so give it its own space. Snapshots and exports show it just after loading.",
+    ARTIFACT_COMMON,
+    "Example: " + JSON.stringify({
+      type: "html", id: "bloch", x: 60, y: 100, width: 560, height: 480, libs: ["three"],
+      source: "<script>\nconst r = new THREE.WebGLRenderer({ antialias: true, alpha: true });\nr.setSize(board.width, board.height);\ndocument.body.appendChild(r.domElement);\n" +
+        "const scene = new THREE.Scene(), cam = new THREE.PerspectiveCamera(40, board.width / board.height, 0.1, 100);\ncam.position.set(3, 2, 3); cam.lookAt(0, 0, 0);\n" +
+        "new THREE.OrbitControls(cam, r.domElement);\nscene.add(new THREE.Mesh(new THREE.SphereGeometry(1, 32, 24), new THREE.MeshBasicMaterial({ color: board.colors.muted, wireframe: true })));\n" +
+        "const m = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1, board.colors.blue);\nscene.add(m);\n" +
+        "let t = 0;\n(function frame() { t += 0.02; m.setDirection(new THREE.Vector3(Math.cos(t), 0.5, Math.sin(t)).normalize()); r.render(scene, cam); requestAnimationFrame(frame); })();\n</script>",
+    }),
   ].join("\n"),
 
   animation: [
@@ -661,7 +690,7 @@ export function summarizeBoard(board, focus) {
     const where = (it.chapter && f === "all" ? ` {${it.chapter}}` : "") + (it.step ? ` s${it.step}` : "");
     if (it._kind === "artifact")
       items.push(`  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.width)}x${r(it.height)}${it.label ? ` "${it.label}"` : ""}${it.source ? ` (${it.source.length} chars)` : ""}` +
-        `${it.params?.length ? ` sliders: ${it.params.map((p) => `${p.name}=${p.value} in [${p.min}, ${p.max}]`).join(", ")}` : ""}${where}`);
+        `${it.params?.length ? ` sliders: ${it.params.map((p) => `${p.name}=${p.value} in [${p.min}, ${p.max}]`).join(", ")}` : ""}${it.libs?.length ? ` libs: ${it.libs.join(", ")}` : ""}${where}`);
     else if (it._kind === "equation")
       items.push(`  [${it.id}] equation at (${r(it._at[0])},${r(it._at[1])}) ${it.label ? `${it.label}: ` : ""}${String(it.latex).slice(0, 80)}${where}`);
     else if (it.points?.length) {
@@ -951,8 +980,11 @@ export const handlers = Object.freeze({
 
   async board_docs(_ctx, params) {
     const topic = params.topic;
-    const text = Object.hasOwn(BOARD_DOCS, topic) ? BOARD_DOCS[topic] : undefined;
+    let text = Object.hasOwn(BOARD_DOCS, topic) ? BOARD_DOCS[topic] : undefined;
     if (!text) throw new Error(`unknown topic "${String(params.topic)}"; one of: ${DOC_TOPICS.join(", ")}`);
+    // Whether html artifacts work here (the same environment starts the board server).
+    if (topic === "overview" || topic === "html")
+      text += `\nhtml artifacts on this board: ${process.env.MATH_BOARD_HTML === "1" ? "on" : "OFF (the learner has not set MATH_BOARD_HTML=1; do not use them)"}.`;
     return { content: [{ type: "text", text: `board_docs ${topic}:\n${text}` }], details: { topic } };
   },
 });

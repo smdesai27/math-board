@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import katex from "katex";
 import "katex/contrib/mhchem"; // \ce{...} chemical equations and \pu{...} units
 import mermaid from "mermaid";
@@ -61,6 +61,7 @@ function setView(v) {
   const svg = $("blackboard");
   svg?.setAttribute("viewBox", v.join(" "));
   updateViewScale(svg);
+  syncFrames();
   scheduleRef();
 }
 /** Board units per screen pixel as a CSS variable, for text that keeps a minimum on-screen size. */
@@ -166,6 +167,7 @@ function applyVisibility() {
   // Caught up with the latest step while stepping manually = live again.
   if (mode === "manual" && shown >= maxStep && !playing) mode = "live";
   for (const g of itemGroups()) g.style.visibility = stepOf(g) > shown && !g.dataset.revealing ? "hidden" : "";
+  syncFrames();
   updateStepUI();
   scheduleRef();
 }
@@ -184,14 +186,14 @@ function tween(ms, apply) {
     running.add(finish);
     if (ms <= 0) return finish();
     apply(0);
-    const frame = (now) => { if (done) return; const t = Math.min(1, (now - t0) / ms); apply(1 - Math.pow(1 - t, 2)); if (t >= 1) finish(); else raf = requestAnimationFrame(frame); };
+    const frame = (now) => { if (done) return; const t = Math.min(1, (now - t0) / ms); apply(1 - Math.pow(1 - t, 2)); syncFrames(); if (t >= 1) finish(); else raf = requestAnimationFrame(frame); };
     raf = requestAnimationFrame(frame);
   });
 }
 const GEOM = "polyline,line,path,rect,ellipse,circle,polygon";
 function defaultReveal(g) {
   if (g.dataset.reveal) return g.dataset.reveal;
-  if (g.dataset.kind === "artifact") return g.querySelector(":scope > .plot") ? "draw" : "wipe";
+  if (g.dataset.kind === "artifact") return g.querySelector(":scope > .plot") ? "draw" : g.querySelector(".html-slot") ? "fade" : "wipe";
   if (g.dataset.kind === "mark") return g.querySelector("[stroke-dasharray]") ? "wipe" : "draw";
   return "write";
 }
@@ -249,6 +251,7 @@ async function reveal(g, token, scale = 1) {
   const ms = how === "none" ? 0 : revealDuration(g, how) * scale;
   g.dataset.revealing = "1";
   g.style.visibility = "";
+  syncFrames();
   try {
     if (how === "draw") await drawIn(g, ms);
     else if (how === "write" || how === "wipe") await wipeIn(g, ms);
@@ -407,7 +410,7 @@ function installNavigation() {
   surface.addEventListener("pointerup", end);
   surface.addEventListener("pointercancel", end);
   surface.addEventListener("pointerleave", () => refLeave());
-  window.addEventListener("resize", () => { updateViewScale(); scheduleRef(); });
+  window.addEventListener("resize", () => { updateViewScale(); syncFrames(); scheduleRef(); });
   // A click on an item copies its reference (after a short wait, so the first
   // click of a double-click does not copy); a drag that ends on an item does not.
   surface.addEventListener("click", (e) => { if (!pressMoved && !e.target.closest("[data-control]")) refClick(e); });
@@ -953,6 +956,7 @@ function Artifact({ item, sig }) {
   }, [item.id, item.type, item.source, item.smiles, item.icon, item.width, item.height]);
   // A changed plot starts again from its sliders' values.
   if (item.type === "plot") return <Plot key={sig} item={item} />;
+  if (item.type === "html") return <HtmlSlot item={item} />;
   if (error) return <g data-render-error={error}>
     <rect x={item.x} y={item.y} width={item.width} height={Math.min(item.height, 70)} fill="#ef6f6c22" stroke="#ef6f6c" strokeDasharray="6 4" />
     <text x={item.x + 12} y={item.y + 28} fill="#ef6f6c" fontSize="16" style={{ fontFamily: FONTS.sans }}>{item.type} artifact failed to render</text>
@@ -965,6 +969,138 @@ function Artifact({ item, sig }) {
 }
 
 const MemoArtifact = React.memo(Artifact, (a, b) => a.sig === b.sig);
+
+/* ---------- html artifacts (sandboxed frames) ---------- */
+// Each html artifact runs in an <iframe sandbox="allow-scripts"> whose document the server serves
+// with its own policy (no network, opaque origin). The frames live in a layer above the board
+// (#frames), each placed over its slot in the SVG whenever the view, a step or a fade changes:
+// Safari neither scales nor places a frame inside an SVG foreignObject. A frame is loaded when its
+// slot first comes near the screen, reports "ready" or its errors by postMessage, and is stopped if
+// it is not ready within FRAME_READY_MS or navigates away. A snapshot page loads every frame, but
+// only once the snapshotter unpauses frames during a call it time-limits (a frame stuck in a loop
+// blocks the whole page), and hides them again between calls so their animations stop.
+const FRAME_READY_MS = 5000;
+const EAGER_FRAMES = NO_FOLLOW;
+let framesPaused = NO_FOLLOW;
+if (framesPaused) document.documentElement.classList.add("frames-paused");
+window.__board.pauseFrames = (paused) => {
+  framesPaused = paused;
+  document.documentElement.classList.toggle("frames-paused", paused);
+  if (!paused) syncFrames();
+};
+const frameStatus = new Map(); // id -> { state: "loading" | "ready" | "error", error }
+const frameStatusListeners = new Set();
+const frameWrappers = new Map(); // id -> { el, mounted, mount(), settle() }
+function setFrameStatus(id, next) {
+  frameStatus.set(id, next);
+  for (const f of frameStatusListeners) f();
+}
+const subscribeFrameStatus = (f) => { frameStatusListeners.add(f); return () => frameStatusListeners.delete(f); };
+const useFrameStatus = (id) => React.useSyncExternalStore(subscribeFrameStatus, () => frameStatus.get(id));
+/** Place every frame over its slot (and hide or fade it with its item); load frames coming into view. */
+function syncFrames() {
+  if (!frameWrappers.size) return;
+  const svg = $("blackboard");
+  if (!svg) return;
+  for (const [id, w] of frameWrappers) {
+    const g = svg.querySelector(`:scope > g[data-id="${CSS.escape(id)}"]`);
+    const slot = g?.querySelector(".html-slot");
+    const m = slot?.getScreenCTM();
+    if (!m) { w.el.style.visibility = "hidden"; continue; }
+    const x = slot.x.baseVal.value, y = slot.y.baseVal.value;
+    w.el.style.transform = `matrix(${m.a},${m.b},${m.c},${m.d},${m.a * x + m.c * y + m.e},${m.b * x + m.d * y + m.f})`;
+    const hidden = g.style.visibility === "hidden";
+    w.el.style.visibility = hidden ? "hidden" : "";
+    w.el.style.opacity = String((g.style.opacity === "" ? 1 : Number(g.style.opacity)) * Number(slot.dataset.opacity ?? 1));
+    if (w.mounted || framesPaused) continue;
+    if (EAGER_FRAMES) w.mount();
+    else if (!hidden) {
+      const r = slot.getBoundingClientRect(), W = innerWidth, H = innerHeight;
+      if (r.right > -W / 2 && r.left < W * 1.5 && r.bottom > -H / 2 && r.top < H * 1.5) w.mount();
+    }
+  }
+}
+// A frame reports to the page by postMessage; the page knows which one by its window.
+window.addEventListener("message", (e) => {
+  const d = e.data;
+  if (!d || d.mathBoard !== 1 || (d.type !== "ready" && d.type !== "error")) return;
+  for (const [id, w] of frameWrappers) {
+    if (!w.el || w.el.querySelector("iframe")?.contentWindow !== e.source) continue;
+    const cur = frameStatus.get(id);
+    if (d.type === "error" && cur?.state !== "error")
+      setFrameStatus(id, { state: "error", live: true, error: `${String(d.message ?? "error").slice(0, 300)}${Number.isInteger(d.line) && d.line > 0 ? ` (line ${d.line} of the source)` : ""}` });
+    else if (d.type === "ready" && cur?.state === "loading") setFrameStatus(id, { state: "ready" });
+    w.settle();
+    return;
+  }
+});
+function HtmlFrame({ id, url, item }) {
+  const ref = React.useRef(null);
+  const [mounted, setMounted] = React.useState(false);
+  const [stopped, setStopped] = React.useState(false);
+  const loads = React.useRef(0);
+  const status = useFrameStatus(id);
+  React.useLayoutEffect(() => {
+    const w = { el: ref.current, mounted: false, mount() { if (!w.mounted) { w.mounted = true; setMounted(true); } }, settle() {} };
+    frameWrappers.set(id, w);
+    syncFrames();
+    return () => { if (frameWrappers.get(id) === w) { frameWrappers.delete(id); frameStatus.delete(id); } };
+  }, [id]);
+  // A layout effect, so a snapshot page counts the frame as pending in the same commit that adds it.
+  React.useLayoutEffect(() => {
+    if (!mounted) return;
+    const w = frameWrappers.get(id);
+    setFrameStatus(id, { state: "loading" });
+    let settle;
+    track(new Promise((r) => { settle = r; })); // snapshots wait for the frame (or its time limit)
+    // A snapshot page leaves the time limit to the server's check, which also catches a frame
+    // that blocks this page (no timer here could fire then).
+    const timer = EAGER_FRAMES ? 0 : setTimeout(() => {
+      if (frameStatus.get(id)?.state === "loading")
+        setFrameStatus(id, { state: "error", error: `not ready after ${FRAME_READY_MS / 1000} s (a long computation or an endless loop?); it was stopped` });
+      setStopped(true);
+      settle();
+    }, FRAME_READY_MS);
+    if (w) w.settle = () => { clearTimeout(timer); settle(); };
+    return () => { clearTimeout(timer); settle(); };
+  }, [id, mounted]);
+  const onLoad = () => {
+    // The first load is the frame's own document; another one means it navigated somewhere else.
+    if (++loads.current < 2) return;
+    setFrameStatus(id, { state: "error", error: "it tried to open another page, which an html artifact may not do; it was stopped" });
+    setStopped(true);
+    frameWrappers.get(id)?.settle();
+  };
+  return <div ref={ref} className="html-frame" data-frame={id} data-error={status?.state === "error" ? status.error : undefined} style={{ width: item.width, height: item.height }}>
+    {mounted && !stopped ? <iframe src={url} sandbox="allow-scripts" referrerPolicy="no-referrer" title={item.label || `html ${id}`} onLoad={onLoad} /> : null}
+  </div>;
+}
+function FrameLayer({ items, frames }) {
+  React.useLayoutEffect(() => { syncFrames(); });
+  return items.filter((a) => frames?.[a.id]).map((a) => <HtmlFrame key={frames[a.id]} id={a.id} url={frames[a.id]} item={a} />);
+}
+/** Words of `text` in lines of at most `n` characters (at most `max` lines). */
+function wrapText(text, n, max) {
+  const lines = [];
+  for (const word of String(text).split(/\s+/)) {
+    const last = lines[lines.length - 1];
+    if (last !== undefined && (last + " " + word).length <= n) lines[lines.length - 1] = `${last} ${word}`;
+    else lines.push(word.length > n ? `${word.slice(0, n - 1)}…` : word);
+  }
+  return lines.length > max ? [...lines.slice(0, max - 1), `${lines[max - 1].slice(0, n - 1)}…`] : lines;
+}
+/** The html artifact's place on the board; its frame sits on top of it, in #frames. */
+function HtmlSlot({ item }) {
+  const status = useFrameStatus(item.id);
+  const error = status?.state === "error" ? status.error : undefined;
+  // A running frame shows its own error along its bottom edge; a stopped or held-back one here.
+  const lines = error && !status.live ? wrapText(`html ${item.id}: ${error}`, Math.max(16, Math.floor((item.width - 24) / 8.4)), Math.max(1, Math.floor((item.height - 16) / 19))) : [];
+  return <g data-render-error={error}>
+    <rect className="html-slot" x={item.x} y={item.y} width={item.width} height={item.height} fill="none" stroke={lines.length ? "#ef6f6c" : "none"} strokeDasharray="6 4" data-opacity={item.opacity} />
+    {lines.length ? <text x={item.x + 12} y={item.y + 26} fill="#ef6f6c" fontSize="14" style={{ fontFamily: FONTS.mono }}>{lines.map((l, i) => <tspan key={i} x={item.x + 12} dy={i ? 19 : 0}>{l}</tspan>)}</text> : null}
+    {status?.state === "checking" ? <text x={item.x + item.width / 2} y={item.y + item.height / 2} fill="#8a8578" fontSize="15" textAnchor="middle" style={{ fontFamily: FONTS.sans }}>checking…</text> : null}
+  </g>;
+}
 
 /* ---------- board ---------- */
 // One draw list for every item kind, ordered by z (stable within equal z).
@@ -994,10 +1130,11 @@ function ChapterFrame({ c }) {
     {c.title ? <text className="chapter-title" x={c.x + 6} y={c.y - 16} fill="#8a8578" fontSize="22" style={{ fontFamily: FONTS.serif, fontStyle: "italic" }}>{c.title}</text> : null}
   </g>;
 }
-function Board({ board, revision }) {
+function Board({ board, revision, frames }) {
   React.useEffect(() => { window.__board.revision = revision; }, [revision, board]);
   const chapters = new Map(chaptersOf(board).map((c) => [c.id, c]));
-  return <svg id="blackboard" viewBox={currentView.join(" ")} preserveAspectRatio="xMidYMid meet" role="img" aria-label="Mathematics blackboard">
+  const html = (board.scene.artifacts || []).filter((a) => a.type === "html");
+  return <>{html.length || frameWrappers.size ? createPortal(<FrameLayer items={html} frames={frames} />, $("frames")) : null}<svg id="blackboard" viewBox={currentView.join(" ")} preserveAspectRatio="xMidYMid meet" role="img" aria-label="Mathematics blackboard">
     {chaptersOf(board).map((c) => <ChapterFrame key={`frame-${c.id}`} c={c} />)}
     {drawList(board).map((d) => {
       if (!d.el) return null;
@@ -1005,7 +1142,7 @@ function Board({ board, revision }) {
       const a = d.anim ?? {};
       return <g key={d.id} data-id={d.id} data-kind={d.kind} data-chapter={c ? c.id : undefined} data-step={a.step ?? 0} data-reveal={a.reveal} data-duration={a.duration} data-order={a.order} transform={c ? `translate(${c.x} ${c.y})` : undefined}>{d.el}</g>;
     })}
-  </svg>;
+  </svg></>;
 }
 
 /* ---------- layout lint (measured from the real DOM) ---------- */
@@ -1061,7 +1198,9 @@ window.__boardLint = (home = { x: 0, y: 0, w: BOARD.w, h: BOARD.h }) => {
     else if ((A.kind === "equation" && B.kind === "artifact") || (A.kind === "artifact" && B.kind === "equation")) { if (frac > 0.15) issues.push(`equation and artifact overlap: ${A.id} / ${B.id} (${Math.round(frac * 100)}%)`); }
     else if (A.kind === "artifact" && B.kind === "artifact" && frac > 0.05) issues.push(`artifacts ${A.id} and ${B.id} overlap (${Math.round(frac * 100)}%)`);
   }
-  return { items, issues };
+  // Each html artifact's frame state, for the server's check of new frames.
+  const frames = Object.fromEntries([...frameStatus].map(([id, st]) => [id, st.state]));
+  return { items, issues, frames };
 };
 
 /* ---------- item references (hover label, click to copy) ---------- */
@@ -1202,13 +1341,21 @@ function render(data) {
   lastData = data;
   if (!root) root = createRoot($("surface"));
   // Commit synchronously so new steps can be hidden before the browser paints.
-  flushSync(() => root.render(<Board board={data.board} revision={data.revision} />));
+  // html artifacts the page may not load (yet): being checked, or failed the check.
+  for (const [id, st] of Object.entries(data.frameStates ?? {}))
+    setFrameStatus(id, st.state === "failed" ? { state: "error", error: st.reason } : { state: "checking" });
+  for (const id of Object.keys(data.frames ?? {})) if (frameStatus.get(id)?.state === "checking") { frameStatus.delete(id); for (const f of frameStatusListeners) f(); }
+  flushSync(() => root.render(<Board board={data.board} revision={data.revision} frames={data.frames} />));
   syncCamera(data.board, first);
   updateViewScale();
   onRendered(data.board, first);
+  syncFrames();
   scheduleRef();
 }
 const sync = new BoardSync({ request, status: (text) => status(text), render: (data) => render(data) });
+// For the headless check page: read the board now; and whether an html artifact's frame has settled.
+window.__board.refresh = () => sync.refresh();
+window.__board.frameSettled = (id) => ["ready", "error"].includes(frameStatus.get(id)?.state);
 const guarded = (fn) => (...args) => Promise.resolve().then(() => fn(...args)).catch((e) => status(e.message, true));
 
 /* ---------- the bar: a quiet pill at rest, the controls below it on hover, focus or tap ---------- */
@@ -1315,7 +1462,9 @@ function connect() {
     onState: onConnection,
     // The first event after an outage may come from a restarted server: show its board as it is.
     onEvent: (d, { resync }) => {
-      if (Number.isSafeInteger(d.revision)) (resync ? sync.resync(d.revision) : sync.remote(d.revision)).catch((e) => status(e.message, true));
+      // The server finished checking new html artifacts: fetch which frames may load now.
+      if (d.type === "frames") sync.refresh().catch((e) => status(e.message, true));
+      else if (Number.isSafeInteger(d.revision)) (resync ? sync.resync(d.revision) : sync.remote(d.revision)).catch((e) => status(e.message, true));
     },
   }).start();
 }

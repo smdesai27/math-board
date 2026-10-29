@@ -7,6 +7,7 @@ The board is a local web page that a language model writes to. So the questions 
 - Other websites open in the same browser, trying to read or write the board (cross-site requests, DNS rebinding).
 - Other machines on the network.
 - Model-written content (LaTeX, SVG, Mermaid, SMILES, plot expressions, text) running script, loading remote resources or escaping into the page.
+- When I turn them on, model-written HTML and JavaScript (html artifacts) reaching the board page, its token, my browser's storage or the network, or making the board unusable.
 - A board growing until the browser or the server stalls.
 - Two writers (the tutor and the page, or two tool calls) silently overwriting each other, and lessons lost to a bad write or a corrupt file.
 
@@ -20,7 +21,7 @@ The board is a local web page that a language model writes to. So the questions 
 - The token reaches the model only when no browser could be opened, so the tutor can pass the URL on. Otherwise tool results name just `127.0.0.1:<port>`.
 - The `Host` header must be exactly `127.0.0.1:<port>`, which stops DNS rebinding. An `Origin` header, when present, must be exactly `http://127.0.0.1:<port>`.
 - The app's static files need no token. They come only from `public/`, only with an allowlisted extension, and every path segment must match a strict pattern, so `..` and encoded traversal get a 404. All board data needs the token.
-- The page is served with a Content-Security-Policy (`default-src 'self'`, `script-src 'self'`, `object-src 'none'`, `frame-src 'none'`, `frame-ancestors 'none'`, `base-uri 'none'`), `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`.
+- The page is served with a Content-Security-Policy (`default-src 'self'`, `script-src 'self'`, `object-src 'none'`, `frame-src 'none'`, or `'self'` when html artifacts are on, `frame-ancestors 'none'`, `base-uri 'none'`), `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`.
 - Nothing is fetched from the internet at runtime: no CDN, fonts are bundled, no telemetry. The MCP server's stdout carries JSON-RPC only.
 
 **Input, limits and writes**
@@ -35,7 +36,7 @@ The board is a local web page that a language model writes to. So the questions 
 
 **What the model can put on the page**
 
-- The model sends data, never code. My code never passes it to `eval`, `new Function` or `innerHTML`.
+- Unless html artifacts are on (below), the model sends data, never code. My code never passes it to `eval`, `new Function` or `innerHTML`.
 - Equations: KaTeX with `trust: false`, `strict: "error"`, `maxExpand: 200` and `maxSize: 20`. Labels and text marks are inserted as text, never as HTML.
 - SVG is parsed with a real XML parser ([`@rgrove/parse-xml`](https://github.com/rgrove/parse-xml): no DTD processing, no custom entities), and everything after that works on the parsed tree, never on the raw text:
   - anything that isn't well-formed XML is rejected with the parser's message, and so are DOCTYPE, processing instructions, CDATA and undefined entities;
@@ -47,6 +48,26 @@ The board is a local web page that a language model writes to. So the questions 
 - Molecules: SMILES strings may contain SMILES characters only.
 - Plots: expressions are compiled by a small parser (`shared/expr.mjs`) that knows arithmetic, a fixed table of functions and the plot variables (`x`, or `t` for parametric curves). Any other name is an error.
 - Icons: sanitized at build time with the same SVG validator the model's SVG goes through.
+
+**html artifacts (off unless `MATH_BOARD_HTML=1`)**
+
+With `MATH_BOARD_HTML=1` the model can send its own HTML and JavaScript (`type: "html"`), for 3D scenes and simulations the declarative formats can't express. That is model-written code running in my browser, so it is off by default and fenced in like this:
+
+- **A sandboxed frame.** Each html artifact runs in an `<iframe sandbox="allow-scripts">` whose document the server builds and serves at `/frame/<mac>`. Without `allow-same-origin` the frame has an opaque origin: it can't read the board page, its token, cookies or storage, and the browser treats it as a different site. No forms, popups, downloads, modals or top-level navigation.
+- **Its own policy.** The frame document has its own Content-Security-Policy (it is a separate document, so it doesn't inherit the page's): `default-src 'none'`, inline scripts and styles, scripts only from the board's own `/vendor/` libraries, fonts only from `/assets/`, images only `data:` and `blob:`, `connect-src 'none'`, `form-action 'none'`, `frame-ancestors` the board only, and the CSP `sandbox allow-scripts` directive, so it is sandboxed even if opened on its own. Nothing can be fetched from the network, and a blocked attempt is reported.
+- **No navigation.** The board page's `frame-src 'self'` stops a frame from navigating itself to another site; a frame that tries is stopped and reported.
+- **Unguessable, content-bound addresses.** `<mac>` is an HMAC of the artifact under the board's token. The page gets it from the authenticated board state; the frame can see it, but it opens nothing except that frame's own source, and it stops working when the content changes. The token is never in a frame's address.
+- **Libraries are local and fixed.** `three`, `d3`, `matter`, `lil-gui`, `fft` and `katex` are bundled at build time into `public/vendor/` (hashed file names, a manifest) and are the only scripts a frame can load. The server answers the frame's opaque `Origin: null` only for `/vendor/` and `/assets/` files, never for the API or the app.
+- **Checked before I see it.** A frame that never yields would freeze the whole board tab: Safari, and Chromium for frames from the same host, run sandboxed frames in the page's own process. So each new or changed html artifact is loaded first in the headless layout check, one at a time, and my page gets its address only after it was ready there within 8 seconds. One that wasn't is never sent to my browser, and the slot and the layout check say why. The check page loads frames only inside time-limited calls, throws the browser away when one stops responding, and hides its frames between calls so they don't use CPU.
+- **Errors come back.** Script errors (with the line in the artifact's source), blocked requests and navigation reach the page by `postMessage` from a small bridge script, and the layout check reports them like a failed artifact. The page accepts only `ready` and `error` messages, matched to a frame by its window, and shows them as text.
+
+What this doesn't cover:
+
+- A frame that passes the check and only loops later (on a click, say) can still freeze the tab in Safari. Reloading the tab and asking the tutor to fix or delete the artifact recovers it.
+- A frame can draw anything inside its box, including something that looks like part of the board or a login form. It can't send what's typed anywhere.
+- Without a headless browser (no Playwright Chromium or system Chrome), frames can't be checked and are shown unchecked.
+- The frame shares the browser process with the board in Safari, so the boundary is the browser's sandbox and origin rules, like for any web page.
+- Safari hides the details of script errors in sandboxed frames; the layout check, which runs in Chromium, still shows them to the tutor.
 
 **The headless browser**
 
@@ -64,7 +85,7 @@ The board is a local web page that a language model writes to. So the questions 
 - Shared machines. Other local users can reach `127.0.0.1`, but not without the token. The token does appear for a moment in the command line of the `open` / `xdg-open` call that launches the browser, which other users can see in the process list. If you share a machine with people you don't trust, keep that in mind.
 - Whatever the model says. The board limits what drawn content can do, not whether it is correct. A prompt injection can still make the tutor draw something wrong or misleading.
 - The pi host and MCP clients themselves. They already run with your permissions.
-- Upstream dependencies. Versions are pinned in `package-lock.json`, but I don't audit KaTeX, Mermaid, SmilesDrawer, React, Playwright, parse-xml or the MCP SDK myself.
+- Upstream dependencies. Versions are pinned in `package-lock.json`, but I don't audit KaTeX, Mermaid, SmilesDrawer, React, Playwright, parse-xml, the MCP SDK or the html artifact libraries (three.js, d3, matter.js, lil-gui, fft.js) myself.
 
 ## Reporting a problem
 

@@ -23,7 +23,7 @@ import { BoardServer } from "../server.mjs";
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SERVER = path.join(ROOT, "mcp", "server.mjs");
 const TOOL_NAMES = ["board_docs", "board_library", "board_open", "board_read", "board_save", "board_snapshot", "board_update"];
-const DOC_TOPICS = ["overview", "workflow", "chapters", "equations", "marks", "plot", "svg", "mermaid", "molecule", "icon", "animation", "layout", "saves"];
+const DOC_TOPICS = ["overview", "workflow", "chapters", "equations", "marks", "plot", "svg", "mermaid", "molecule", "icon", "html", "animation", "layout", "saves"];
 
 const tempDirs = [];
 const tempDir = () => {

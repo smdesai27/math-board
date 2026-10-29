@@ -88,7 +88,7 @@ const tool = (name) => def(name);
 
 // board_docs: every topic returns reference text without starting the server.
 const topics = def("board_docs").parameters.properties.topic.enum;
-assert.deepEqual(topics, ["overview", "workflow", "chapters", "equations", "marks", "plot", "svg", "mermaid", "molecule", "icon", "animation", "layout", "saves"]);
+assert.deepEqual(topics, ["overview", "workflow", "chapters", "equations", "marks", "plot", "svg", "mermaid", "molecule", "icon", "html", "animation", "layout", "saves"]);
 for (const topic of topics) {
   const r = await tool("board_docs").execute(`docs-${topic}`, { topic }, undefined, undefined, ctx);
   assert.equal(r.content[0].type, "text");

@@ -22,7 +22,7 @@
  */
 
 import http from "node:http";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
@@ -181,7 +181,84 @@ export function emptyBoard(title = DEFAULT_TITLE) {
 }
 
 export const REVEALS = ["draw", "write", "wipe", "fade", "none"];
-export const ARTIFACT_TYPES = ["svg", "mermaid", "plot", "molecule", "icon"];
+export const ARTIFACT_TYPES = ["svg", "mermaid", "plot", "molecule", "icon", "html"];
+/**
+ * html artifacts: HTML and JavaScript the model writes, run in a sandboxed frame (see
+ * frameDocument). Off unless the learner starts the board with MATH_BOARD_HTML=1.
+ */
+export const HTML_LIBS = Object.freeze(["three", "d3", "matter", "lil-gui", "fft", "katex"]);
+export const MAX_HTML_SOURCE = 64 * 1024;
+export const HTML_OFF = "html artifacts are off on this board (the learner turns them on with MATH_BOARD_HTML=1); draw it as a plot (params make sliders), svg or mermaid instead";
+export const htmlEnabled = (env = process.env) => env.MATH_BOARD_HTML === "1";
+
+/** public/vendor/manifest.json: library name -> hashed file (written by npm run build). */
+export function vendorManifest() {
+  try { return JSON.parse(readFileSync(path.join(__dirname, "public", "vendor", "manifest.json"), "utf8")); }
+  catch { return {}; }
+}
+/**
+ * The frame's own policy (it is a separate document, so it does not inherit the page's): inline
+ * scripts and styles, the board's libraries and fonts, data:/blob: images, and nothing from the
+ * network. sandbox allow-scripts gives it an opaque origin even if opened on its own: no access to
+ * the board page, its token, cookies or storage, no forms, popups, downloads or top navigation.
+ */
+export function frameCsp(port) {
+  const here = `http://127.0.0.1:${port}`;
+  return [
+    "default-src 'none'",
+    `script-src 'unsafe-inline' ${here}/vendor/`,
+    `style-src 'unsafe-inline' ${here}/vendor/`,
+    `font-src ${here}/assets/ data:`,
+    "img-src data: blob:",
+    "media-src data: blob:",
+    "connect-src 'none'",
+    "worker-src 'none'",
+    "frame-src 'none'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    `frame-ancestors ${here}`,
+    "sandbox allow-scripts",
+  ].join("; ");
+}
+const FRAME_STYLE =
+  ':root{color-scheme:dark}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;color:#e8e3d9;' +
+  'font:16px/1.4 Charter,"Bitstream Charter",Cambria,Georgia,serif}canvas,svg{display:block}button,input,select{font:inherit;color:inherit}';
+/**
+ * The bridge runs first in every frame. It reports to the page (postMessage; the page knows the
+ * frame by its window): "ready" just after load (or when the code calls board.ready() after
+ * board.wait()), and the first errors, with line numbers counted in the artifact's source. It
+ * also gives the code window.board: its size and the chalk colours.
+ */
+function frameBridge(item, offset) {
+  const colors = { chalk: "#e8e3d9", muted: "#8a8578", yellow: "#f2c14e", blue: "#5fb3d9", red: "#ef6f6c", green: "#8de0be", purple: "#c39bd3", background: "#000000" };
+  return `(()=>{const OFFSET=${offset};let sent=false,manual=false,errors=0;` +
+    `const post=(type,extra)=>{try{parent.postMessage(Object.assign({mathBoard:1,type},extra),"*")}catch(e){}};` +
+    `const fail=(message,line)=>{if(++errors>5)return;post("error",{message:String(message).slice(0,300),line:line>OFFSET?line-OFFSET:undefined})};` +
+    `addEventListener("error",(e)=>{const t=e.target;if(t&&t!==window&&(t.src||t.href)){fail("could not load "+String(t.src||t.href).split("/").pop());return}` +
+    `fail(e.message&&e.message!=="Script error."?e.message:"a script error (this browser hides the details; the tutor's layout check shows them)",e.lineno)},true);` +
+    `addEventListener("unhandledrejection",(e)=>fail("unhandled promise rejection: "+(e.reason&&e.reason.message||e.reason)));` +
+    `document.addEventListener("securitypolicyviolation",(e)=>fail("blocked by the sandbox: "+e.effectiveDirective+(e.blockedURI?" "+e.blockedURI:"")+" (html artifacts cannot use the network)"));` +
+    `window.board=Object.freeze({width:${item.width},height:${item.height},colors:Object.freeze(${JSON.stringify(colors)}),font:"Charter, Cambria, Georgia, serif",` +
+    `wait(){manual=true},ready(){if(!sent){sent=true;post("ready")}},fail(m){fail(m)}});` +
+    // A timer, not requestAnimationFrame: browsers pause animation frames in frames off screen.
+    `addEventListener("load",()=>{if(!manual)setTimeout(()=>board.ready(),0)})})();`;
+}
+/** The document an html artifact's frame loads: bridge, libraries, then the source as the body. */
+export function frameDocument(item, manifest = vendorManifest()) {
+  const libs = item.libs ?? [];
+  const lines = (offset) => [
+    "<!doctype html>",
+    '<html lang="en"><head><meta charset="utf-8"><meta name="color-scheme" content="dark">',
+    `<style>${FRAME_STYLE}</style>`,
+    `<script>${frameBridge(item, offset)}</script>`,
+    ...(libs.includes("katex") && manifest["katex.css"] ? [`<link rel="stylesheet" href="/${manifest["katex.css"]}">`] : []),
+    ...libs.map((l) => (manifest[l] ? `<script src="/${manifest[l]}"></script>` : `<script>board.fail(${JSON.stringify(`the ${l} library is missing from this install (run npm run build)`)})</script>`)),
+    "</head><body>",
+  ];
+  const head = lines(lines(0).length).join("\n"); // the source starts on the line after these
+  return `${head}\n${item.source}\n</body></html>\n`;
+}
 
 const fail = (message) => {
   throw new Error(message);
@@ -523,6 +600,7 @@ const ARTIFACT_KEYS = {
   molecule: keys(ARTIFACT_COMMON_KEYS, "smiles"),
   svg: keys(ARTIFACT_COMMON_KEYS, "source"),
   mermaid: keys(ARTIFACT_COMMON_KEYS, "source"),
+  html: keys(ARTIFACT_COMMON_KEYS, "source", "libs"),
 };
 
 /** Mermaid text: rendered with securityLevel strict and shown as an image; links, callbacks, markup and directives are refused. */
@@ -537,7 +615,7 @@ export function checkMermaidSource(source) {
 }
 
 /** An artifact (plot, svg, mermaid, molecule, icon). Throws with a reason when it is invalid. */
-export function sanitizeArtifact(raw, { strict = false, keys: checkKeys = strict, where = "artifact" } = {}) {
+export function sanitizeArtifact(raw, { strict = false, keys: checkKeys = strict, where = "artifact", html = false } = {}) {
   if (!raw || typeof raw !== "object" || !ARTIFACT_TYPES.includes(raw.type)) fail(`${where}: invalid artifact type (one of: ${ARTIFACT_TYPES.join(", ")})`);
   if (checkKeys) onlyKeys(raw, ARTIFACT_KEYS[raw.type], `${where} (${raw.type})`);
   const r = reader(raw, where, strict);
@@ -550,6 +628,19 @@ export function sanitizeArtifact(raw, { strict = false, keys: checkKeys = strict
     height: clamp(r.num("height", 0) || 280, 60, 800),
   };
   if (raw.type === "plot") Object.assign(out, sanitizePlot(raw, strict, where));
+  else if (raw.type === "html") {
+    if (!html) fail(`${where}: ${HTML_OFF}`);
+    if (typeof raw.source !== "string" || !raw.source.trim()) fail(`${where}: html needs source: the inside of <body> (elements, <style> and classic <script>)`);
+    const bytes = Buffer.byteLength(raw.source);
+    if (bytes > MAX_HTML_SOURCE) fail(`${where}: html source is ${Math.ceil(bytes / 1024)} KiB; at most ${MAX_HTML_SOURCE / 1024} KiB`);
+    out.source = raw.source;
+    if (raw.libs !== undefined) {
+      const libs = Array.isArray(raw.libs) ? raw.libs : [];
+      const ok = libs.filter((l, i) => HTML_LIBS.includes(l) && libs.indexOf(l) === i);
+      if (strict && (!Array.isArray(raw.libs) || ok.length !== libs.length)) fail(`${where}: libs must be a list of distinct names from: ${HTML_LIBS.join(", ")}`);
+      if (ok.length) out.libs = ok;
+    }
+  }
   else if (raw.type === "icon") {
     const icon = iconIndex().get(raw.icon);
     if (!icon) fail(`unknown icon "${String(raw.icon).slice(0, 60)}": search with board_library first`);
@@ -726,7 +817,7 @@ export function legacyEquationPositions(equations) {
  * Returns { board, warnings, touched }: warnings found without a browser (overlapping chapters)
  * and the ids of the items and chapters the update added or changed.
  */
-export function applyUpdateReport(state, update, { strict = true } = {}) {
+export function applyUpdateReport(state, update, { strict = true, html = false } = {}) {
   if (!update || typeof update !== "object" || Array.isArray(update)) fail("update must be an object");
   for (const key of Object.keys(update)) if (!UPDATE_KEYS.has(key)) fail(`unknown update field: ${key}`);
   if (update.equations !== undefined && !Array.isArray(update.equations)) fail("equations must be an array");
@@ -800,13 +891,13 @@ export function applyUpdateReport(state, update, { strict = true } = {}) {
     if (strict && rawShapes.length > MAX_SHAPES_PER_UPDATE) fail(`too many shapes in one update (max ${MAX_SHAPES_PER_UPDATE})`);
     if (strict && rawArtifacts.length > MAX_ARTIFACTS_PER_UPDATE) fail(`too many artifacts in one update (max ${MAX_ARTIFACTS_PER_UPDATE})`);
     const shapes = rawShapes.map((s, i) => shapeOf(s, { strict, where: `scene.shapes[${i}]${s?.id ? ` "${String(s.id).slice(0, 64)}"` : ""}` }));
-    const artifacts = rawArtifacts.map((a, i) => sanitizeArtifact(a, { strict, where: `scene.artifacts[${i}]${a?.id ? ` "${String(a.id).slice(0, 64)}"` : ""}` }));
+    const artifacts = rawArtifacts.map((a, i) => sanitizeArtifact(a, { strict, html, where: `scene.artifacts[${i}]${a?.id ? ` "${String(a.id).slice(0, 64)}"` : ""}` }));
     for (const it of [...shapes, ...artifacts]) touched.add(it.id);
     if (mode === "replace") next.scene = { shapes, artifacts };
     else next.scene = { shapes: [...next.scene.shapes, ...shapes], artifacts: [...next.scene.artifacts, ...artifacts] };
     if (next.scene.shapes.length + next.scene.artifacts.length > MAX_SCENE_ITEMS) fail(`too many scene items (max ${MAX_SCENE_ITEMS} shapes and artifacts in total)`);
   }
-  if (update.items !== undefined) applyItemOps(next, update.items, strict, touched);
+  if (update.items !== undefined) applyItemOps(next, update.items, strict, touched, html);
   if (update.camera !== undefined) next.camera = sanitizeCamera(update.camera, next.chapters, { strict });
 
   // Ids are unique across shapes, artifacts and equations, so items ops and the learner's
@@ -928,7 +1019,7 @@ function findItem(board, id) {
  *   {op:"move", id, dx, dy}       translate (points, x/y, or equation box)
  *   {op:"delete", id}
  */
-function applyItemOps(board, ops, strict, touched) {
+function applyItemOps(board, ops, strict, touched, html) {
   if (!Array.isArray(ops)) fail("items must be an array");
   if (ops.length > 500) fail("too many item ops (max 500)");
   ops.forEach((op, n) => {
@@ -968,7 +1059,7 @@ function applyItemOps(board, ops, strict, touched) {
       next = { ...cur, ...fields, id: cur.id, type: cur.type };
       if (kind === "equations") delete next.type;
     } else fail(`${where}: invalid item op: ${show(op.op)} (update, move or delete)`);
-    const opts = { strict, keys: false, where };
+    const opts = { strict, keys: false, where, html };
     list[i] = kind === "shapes" ? shapeOf(next, opts) : kind === "artifacts" ? sanitizeArtifact(next, opts) : equationOf(next, opts);
     touched.add(cur.id);
   });
@@ -1000,7 +1091,7 @@ export function describeDropped(dropped) {
  * Excalidraw elements from 0.2 saves become shapes, and equations saved without x,y keep the
  * place the page drew them at, so old lessons look the same.
  */
-export function restoreOps(saved) {
+export function restoreOps(saved, { html = false } = {}) {
   const dropped = { chapters: 0, shapes: 0, artifacts: 0, equations: 0, duplicates: 0, elements: 0, references: 0, camera: false, reasons: [] };
   const reason = (message) => {
     if (dropped.reasons.length < 3 && !dropped.reasons.includes(message)) dropped.reasons.push(message.slice(0, 160));
@@ -1051,7 +1142,7 @@ export function restoreOps(saved) {
     else if (!e?.isDeleted) { dropped.elements++; reason(`unsupported Excalidraw element ${show(e?.type)}`); }
   }
   const shapes = take([...(Array.isArray(board.scene?.shapes) ? board.scene.shapes : []), ...legacy], MAX_SCENE_ITEMS, "shapes", (s) => unique(shapeOf(fix(s), { where: "a shape" })));
-  const artifacts = take(board.scene?.artifacts, MAX_SCENE_ITEMS - shapes.length, "artifacts", (a) => unique(sanitizeArtifact(fix(a), { where: "an artifact" })));
+  const artifacts = take(board.scene?.artifacts, MAX_SCENE_ITEMS - shapes.length, "artifacts", (a) => unique(sanitizeArtifact(fix(a), { where: "an artifact", html })));
   // Equations saved without x,y get the place the page drew them at, then keep it.
   const rawEquations = (Array.isArray(board.equations) ? board.equations : []).map(fix);
   const legacyPositions = legacyEquationPositions(rawEquations);
@@ -1126,8 +1217,14 @@ const firstLine = (err) => String(err?.message ?? err).split("\n")[0];
 /* ------------------------------------------------------------------ */
 
 export class BoardServer {
-  constructor({ dataDir, title, autosave = true, kind = "pi" } = {}) {
+  constructor({ dataDir, title, autosave = true, kind = "pi", html = htmlEnabled() } = {}) {
     this.dataDir = path.resolve(dataDir ?? defaultDataDir(kind));
+    this.html = html; // html artifacts allowed (MATH_BOARD_HTML=1)
+    // Headless check of each html artifact's frame (by MAC): { state: "ok" | "failed" | "unchecked", reason? }.
+    // A learner's page gets a frame only after the check page loaded it without hanging.
+    this.frameChecks = new Map();
+    this.frameCheckTries = new Map(); // mac -> background checks started for it
+    this.frameCheck = null;
     this.autosave = autosave;
     this.autosaveTimer = null;
     this.autosavedRevision = 0; // revision 0 is the empty board: nothing to write until a change
@@ -1176,7 +1273,7 @@ export class BoardServer {
   apply({ baseRevision, ...update }, { strict = true } = {}) {
     if (this.stopping || this.stopped) fail("this board server was stopped; call board_open to start the board again");
     if (baseRevision !== undefined) this.checkRevision(baseRevision);
-    const { board, warnings, touched } = applyUpdateReport(this.board, update, { strict });
+    const { board, warnings, touched } = applyUpdateReport(this.board, update, { strict, html: this.html });
     this.board = board;
     this.revision += 1;
     this.broadcast({ type: "revision", revision: this.revision });
@@ -1279,7 +1376,7 @@ export class BoardServer {
 
   /** See restoreOps. */
   restoreOps(saved) {
-    return restoreOps(saved);
+    return restoreOps(saved, { html: this.html });
   }
 
   /**
@@ -1295,7 +1392,7 @@ export class BoardServer {
       if (err?.code === "ENOENT") fail(`no save named ${JSON.stringify(name)}`);
       fail(`save ${name}: ${firstLine(err).replace(/^save /, "")}`);
     }
-    const { update, dropped } = restoreOps(payload.board);
+    const { update, dropped } = restoreOps(payload.board, { html: this.html });
     const { revision } = this.apply({ baseRevision, ...update }, { strict: false });
     return { revision, dropped, skipped: describeDropped(dropped) };
   }
@@ -1396,7 +1493,7 @@ export class BoardServer {
       return unusable(firstLine(err));
     }
     try {
-      const { update, dropped } = restoreOps(payload.board);
+      const { update, dropped } = restoreOps(payload.board, { html: this.html });
       this.apply(update, { strict: false });
       this.autosavedRevision = this.revision;
       this.restoredFrom = payload.savedAt;
@@ -1596,12 +1693,11 @@ export class BoardServer {
     res.setHeader("Referrer-Policy", "no-referrer");
     res.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; frame-src ${this.html ? "'self'" : "'none'"}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`,
     );
     try {
       // Every route: exact loopback Host (DNS rebinding) and, when sent, the board's own Origin.
       if (req.headers.host !== `127.0.0.1:${this.port}`) return this.json(res, 403, { ok: false, error: "forbidden host" });
-      if (req.headers.origin !== undefined && !this.allowedOrigin(req.headers.origin)) return this.json(res, 403, { ok: false, error: "forbidden origin" });
       let pathname, url;
       try {
         url = new URL(req.url ?? "/", `http://127.0.0.1:${this.port}`);
@@ -1609,6 +1705,12 @@ export class BoardServer {
       } catch {
         return this.json(res, 400, { ok: false, error: "malformed URL" });
       }
+      const snapshot = req.headers[SNAPSHOT_HEADER] === "1";
+      // html artifact frames have an opaque origin ("null"); they may load only the libraries and fonts.
+      const library = req.method === "GET" && /^\/(vendor|assets)\//.test(pathname);
+      if (req.headers.origin !== undefined && !this.allowedOrigin(req.headers.origin) && !(library && req.headers.origin === "null"))
+        return this.json(res, 403, { ok: false, error: "forbidden origin" });
+      if (req.method === "GET" && pathname.startsWith("/frame/")) return this.serveFrame(res, pathname.slice("/frame/".length));
       // Static app routes (page load carries no auth yet; the app reads the token from the URL
       // fragment and sends it on every API call).
       if (req.method === "GET" && !pathname.startsWith("/api/")) {
@@ -1616,7 +1718,7 @@ export class BoardServer {
         if (!rel.split("/").every((part) => /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(part))) return this.notFound(res);
         const type = MIME[path.extname(rel)];
         if (!type) return this.notFound(res);
-        return this.serveFile(res, rel, type);
+        return this.serveFile(res, rel, type, library ? { "access-control-allow-origin": "*", ...(rel.startsWith("vendor/") && { "cache-control": "public, max-age=31536000, immutable" }) } : {});
       }
 
       if (pathname === "/api/events" && req.method === "GET") {
@@ -1643,7 +1745,10 @@ export class BoardServer {
 
       if (req.headers.authorization !== `Bearer ${this.token}`) return this.json(res, 401, { ok: false, error: "missing or invalid bearer token" });
 
-      if (req.method === "GET" && pathname === "/api/state") return this.json(res, 200, { ok: true, revision: this.revision, board: this.board });
+      if (req.method === "GET" && pathname === "/api/state") {
+        if (!snapshot) this.checkFramesSoon();
+        return this.json(res, 200, { ok: true, revision: this.revision, board: this.board, ...this.frames(snapshot) });
+      }
       if (req.method === "GET" && pathname === "/api/saves") return this.json(res, 200, { ok: true, saves: await this.listSaves() });
 
       if (req.method === "POST") {
@@ -1653,7 +1758,7 @@ export class BoardServer {
         if (body === null) return; // already answered (413/400)
         if (["/api/update", "/api/clear", "/api/load"].includes(pathname) && !Number.isSafeInteger(body.baseRevision))
           return this.json(res, 400, { ok: false, error: "baseRevision is required" });
-        const failed = (err, code = 400) => this.json(res, err.conflict ? 409 : code, { ok: false, error: String(err.message ?? err), revision: this.revision, board: this.board });
+        const failed = (err, code = 400) => this.json(res, err.conflict ? 409 : code, { ok: false, error: String(err.message ?? err), revision: this.revision, board: this.board, ...this.frames(snapshot) });
         const BODY_KEYS = { "/api/clear": keys("baseRevision", "scopes"), "/api/save": keys("baseRevision", "name"), "/api/load": keys("baseRevision", "name") };
         try {
           // A stale page gets the 409 first (with the current board, to re-read and ask again);
@@ -1667,7 +1772,7 @@ export class BoardServer {
           case "/api/update": {
             try {
               const { revision, warnings } = this.apply(body);
-              return this.json(res, 200, { ok: true, revision, warnings, board: this.board });
+              return this.json(res, 200, { ok: true, revision, warnings, board: this.board, ...this.frames(snapshot) });
             } catch (err) {
               return failed(err);
             }
@@ -1675,7 +1780,7 @@ export class BoardServer {
           case "/api/clear":
             try {
               this.update({ baseRevision: body.baseRevision, clear: body.scopes ?? ["all"] });
-              return this.json(res, 200, { ok: true, revision: this.revision, board: this.board });
+              return this.json(res, 200, { ok: true, revision: this.revision, board: this.board, ...this.frames(snapshot) });
             } catch (err) {
               return failed(err);
             }
@@ -1690,7 +1795,7 @@ export class BoardServer {
           case "/api/load": {
             try {
               const { revision, skipped } = await this.load(String(body?.name ?? "default"), body.baseRevision);
-              return this.json(res, 200, { ok: true, revision, skipped, board: this.board });
+              return this.json(res, 200, { ok: true, revision, skipped, board: this.board, ...this.frames(snapshot) });
             } catch (err) {
               return failed(err, /^no save named/.test(err.message) ? 404 : 400);
             }
@@ -1702,7 +1807,7 @@ export class BoardServer {
     } catch (err) {
       if (!res.headersSent) {
         try {
-          this.json(res, err.conflict ? 409 : 400, { ok: false, error: String(err?.message ?? err), revision: this.revision, board: this.board });
+          this.json(res, err.conflict ? 409 : 400, { ok: false, error: String(err?.message ?? err), revision: this.revision, board: this.board, ...this.frames(snapshot) });
         } catch {}
       } else {
         try {
@@ -1716,16 +1821,107 @@ export class BoardServer {
     return origin === `http://127.0.0.1:${this.port}`;
   }
 
+  /**
+   * The path of an html artifact's frame document: /frame/<mac>, where mac is an HMAC of the
+   * artifact under this board's token. The page learns it from the authenticated state, the frame
+   * may see it (it gives access to nothing but its own source), and it changes with the content.
+   */
+  frameMac(item) {
+    const digest = createHash("sha256").update(JSON.stringify([item.id, item.source, item.libs ?? [], item.width, item.height])).digest();
+    return createHmac("sha256", this.token).update(digest).digest("hex").slice(0, 32);
+  }
+  /**
+   * Sent with every board state: frames { id: "/frame/<mac>" } the page may load, and frameStates
+   * { id: { state: "checking" } | { state: "failed", reason } } for those it may not (yet). The
+   * headless check page (`snapshot`) also gets the next frame to check: loading it is the check.
+   */
+  frames(snapshot = false) {
+    const frames = {}, frameStates = {};
+    if (!this.html) return { frames, frameStates };
+    const next = snapshot ? this.frameToCheck() : null;
+    for (const a of this.board.scene.artifacts) {
+      if (a.type !== "html") continue;
+      const mac = this.frameMac(a), check = this.frameChecks.get(mac);
+      if (check?.state === "failed") frameStates[a.id] = { state: "failed", reason: check.reason };
+      else if (check || mac === next?.mac) frames[a.id] = `/frame/${mac}`;
+      else frameStates[a.id] = { state: "checking" };
+    }
+    return { frames, frameStates };
+  }
+  /**
+   * The html artifact whose frame the next headless call checks, { id, mac }, or null. One at a
+   * time, so a frame that hangs the check page is the one that is named and held back.
+   */
+  frameToCheck() {
+    if (!this.html) return null;
+    for (const a of this.board.scene.artifacts) {
+      if (a.type !== "html") continue;
+      const mac = this.frameMac(a);
+      if (!this.frameChecks.has(mac)) return { id: a.id, mac };
+    }
+    return null;
+  }
+  /** [frameToCheck()] or [] (what a headless call is about to check). */
+  uncheckedFrames() {
+    const next = this.frameToCheck();
+    return next ? [next] : [];
+  }
+  /**
+   * Record a headless check of `list` (from uncheckedFrames): `states` (id -> the page's frame
+   * state) when the check finished, or the error that ended it. A frame that hung the check page
+   * is never sent to a learner; without a headless browser frames are sent unchecked.
+   */
+  frameChecked(list, states, err) {
+    let changed = false;
+    for (const { id, mac } of list) {
+      if (this.frameChecks.has(mac)) continue;
+      if (err && /timed? ?out|Timeout \d+ms exceeded/i.test(String(err.message)))
+        this.frameChecks.set(mac, { state: "failed", reason: "not shown: in the headless check it was not ready within 8 s (an endless loop, a long computation, or board.wait() without board.ready()?)" });
+      else if (err && /no headless browser/i.test(String(err.message))) this.frameChecks.set(mac, { state: "unchecked" });
+      else if (!err && states?.[id] && states[id] !== "loading") this.frameChecks.set(mac, { state: "ok" });
+      else continue;
+      changed = true;
+    }
+    if (changed) {
+      this.broadcast({ type: "frames" });
+      this.checkFramesSoon(); // the next one, if any
+    }
+  }
+  /** Check the next unchecked frame in the background (at most twice each), then the one after. */
+  checkFramesSoon() {
+    if (this.frameCheck || this.stopping || this.stopped) return;
+    const next = this.frameToCheck();
+    const tries = next ? (this.frameCheckTries.get(next.mac) ?? 0) : 0;
+    if (!next || tries >= 2) return;
+    this.frameCheckTries.set(next.mac, tries + 1);
+    this.frameCheck = Promise.resolve()
+      .then(() => this.snapshots.lint())
+      .catch(() => {})
+      .finally(() => {
+        this.frameCheck = null;
+        this.checkFramesSoon();
+      });
+  }
+  serveFrame(res, mac) {
+    const want = /^[a-f0-9]{32}$/.test(mac) ? Buffer.from(mac) : null;
+    const item = this.html && want ? this.board.scene.artifacts.find((a) => a.type === "html" && timingSafeEqual(Buffer.from(this.frameMac(a)), want)) : null;
+    if (!item) return this.notFound(res);
+    const body = frameDocument(item, vendorManifest());
+    res.setHeader("Content-Security-Policy", frameCsp(this.port));
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-length": Buffer.byteLength(body) });
+    res.end(body);
+  }
+
   notFound(res) {
     this.json(res, 404, { ok: false, error: "not found" });
   }
 
-  async serveFile(res, relPath, type) {
+  async serveFile(res, relPath, type, headers = {}) {
     const abs = path.join(__dirname, "public", relPath);
     if (!abs.startsWith(path.join(__dirname, "public") + path.sep)) return this.notFound(res);
     try {
       const data = await readFile(abs);
-      res.writeHead(200, { "content-type": type, "cache-control": "no-store", "content-length": data.length });
+      res.writeHead(200, { "content-type": type, "cache-control": "no-store", ...headers, "content-length": data.length });
       res.end(data);
     } catch {
       this.notFound(res);

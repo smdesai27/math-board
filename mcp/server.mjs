@@ -19,6 +19,7 @@
  *                            or %LOCALAPPDATA%\math-board), apart from pi's, so the two never
  *                            overwrite each other's autosave
  *   MATH_BOARD_NO_BROWSER=1  board_open returns the URL without opening a browser
+ *   MATH_BOARD_HTML=1        allow html artifacts (the model's own HTML and JavaScript, sandboxed)
  *
  * stdout carries JSON-RPC only; diagnostics go to stderr. No network beyond 127.0.0.1, no
  * telemetry. When the client disconnects (stdin closes) or on SIGINT, SIGTERM or SIGHUP the
