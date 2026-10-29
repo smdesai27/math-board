@@ -989,7 +989,10 @@ const MemoArtifact = React.memo(Artifact, (a, b) => a.sig === b.sig);
 // the snapshotter runs a call it time-limits (a frame stuck in a loop blocks the whole page): the
 // one frame a layout check is checking, or all of them for a snapshot. Between calls none is
 // loaded, so no model code runs there while it waits.
-const FRAME_READY_MS = 5000;
+// More than the check page's 8 s (snapshot.mjs), so a frame that passed the check is not stopped here.
+const FRAME_READY_MS = 10000;
+// #html=off in the board's address: load no html frame in this tab (for a tab a frame freezes).
+const HTML_OFF_HERE = hash.get("html") === "off";
 const EAGER_FRAMES = NO_FOLLOW;
 let framesPaused = NO_FOLLOW;
 let framesWanted = null; // snapshot page: ids of the frames this call loads (null: all)
@@ -1025,7 +1028,7 @@ function syncFrames() {
     const hidden = g.style.visibility === "hidden";
     w.el.style.visibility = hidden ? "hidden" : "";
     w.el.style.opacity = String((g.style.opacity === "" ? 1 : Number(g.style.opacity)) * Number(slot.dataset.opacity ?? 1));
-    if (w.mounted || framesPaused) continue;
+    if (w.mounted || framesPaused || HTML_OFF_HERE) continue;
     if (EAGER_FRAMES) { if (!framesWanted || framesWanted.has(id)) w.mount(); }
     else if (!hidden) {
       const r = slot.getBoundingClientRect(), W = innerWidth, H = innerHeight;
@@ -1056,7 +1059,8 @@ function HtmlFrame({ id, url, item }) {
   React.useLayoutEffect(() => {
     const w = {
       el: ref.current, mounted: false, settle() {},
-      mount() { if (!w.mounted) { w.mounted = true; setMounted(true); } },
+      // Loaded again (a snapshot page loads frames per call): a fresh document, not a navigation.
+      mount() { if (!w.mounted) { w.mounted = true; loads.current = 0; setStopped(false); setMounted(true); } },
       unmount() { if (w.mounted) { w.mounted = false; setMounted(false); } },
     };
     frameWrappers.set(id, w);
@@ -1065,7 +1069,7 @@ function HtmlFrame({ id, url, item }) {
   }, [id]);
   // A layout effect, so a snapshot page counts the frame as pending in the same commit that adds it.
   React.useLayoutEffect(() => {
-    if (!mounted) return;
+    if (!mounted || stopped) return; // a stopped frame shows no iframe, so there is nothing to wait for
     const w = frameWrappers.get(id);
     setFrameStatus(id, { state: "loading" });
     let settle;
@@ -1080,7 +1084,7 @@ function HtmlFrame({ id, url, item }) {
     }, FRAME_READY_MS);
     if (w) w.settle = () => { clearTimeout(timer); settle(); };
     return () => { clearTimeout(timer); settle(); };
-  }, [id, mounted]);
+  }, [id, mounted, stopped]);
   const onLoad = () => {
     // The first load is the frame's own document; another one means it navigated somewhere else.
     if (++loads.current < 2) return;
@@ -1115,7 +1119,7 @@ function HtmlSlot({ item }) {
   return <g data-render-error={error}>
     <rect className="html-slot" x={item.x} y={item.y} width={item.width} height={item.height} fill="none" stroke={lines.length ? "#ef6f6c" : "none"} strokeDasharray="6 4" data-opacity={item.opacity} />
     {lines.length ? <text x={item.x + 12} y={item.y + 26} fill="#ef6f6c" fontSize="14" style={{ fontFamily: FONTS.mono }}>{lines.map((l, i) => <tspan key={i} x={item.x + 12} dy={i ? 19 : 0}>{l}</tspan>)}</text> : null}
-    {status?.state === "checking" ? <text x={item.x + item.width / 2} y={item.y + item.height / 2} fill="#8a8578" fontSize="15" textAnchor="middle" style={{ fontFamily: FONTS.sans }}>checking…</text> : null}
+    {status?.state === "checking" || status?.state === "off" ? <text x={item.x + item.width / 2} y={item.y + item.height / 2} fill="#8a8578" fontSize="15" textAnchor="middle" style={{ fontFamily: FONTS.sans }}>{status.state === "off" ? "html is off in this tab (#html=off)" : "checking…"}</text> : null}
   </g>;
 }
 
@@ -1358,11 +1362,15 @@ function render(data) {
   lastData = data;
   if (!root) root = createRoot($("surface"));
   // Commit synchronously so new steps can be hidden before the browser paints.
-  // html artifacts the page may not load (yet): being checked, or failed the check.
+  flushSync(() => root.render(<Board board={data.board} revision={data.revision} frames={data.frames} />));
+  // html artifacts the page may not load (yet): being checked, failed the check, or off in this
+  // tab. Set after the commit, which removes the frames of changed artifacts (and their state).
   for (const [id, st] of Object.entries(data.frameStates ?? {}))
     setFrameStatus(id, st.state === "failed" ? { state: "error", error: st.reason } : { state: "checking" });
-  for (const id of Object.keys(data.frames ?? {})) if (frameStatus.get(id)?.state === "checking") { frameStatus.delete(id); for (const f of frameStatusListeners) f(); }
-  flushSync(() => root.render(<Board board={data.board} revision={data.revision} frames={data.frames} />));
+  for (const id of Object.keys(data.frames ?? {})) {
+    if (HTML_OFF_HERE) setFrameStatus(id, { state: "off" });
+    else if (frameStatus.get(id)?.state === "checking") { frameStatus.delete(id); for (const f of frameStatusListeners) f(); }
+  }
   syncCamera(data.board, first);
   updateViewScale();
   onRendered(data.board, first);

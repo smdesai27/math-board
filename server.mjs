@@ -236,6 +236,11 @@ function frameBridge(item, offset) {
     // CSP has no directive for WebRTC, which can reach the network (STUN/TURN). Removing the
     // constructors stops the direct route; a nested frame could still find them (SECURITY.md).
     `for(const k of ["RTCPeerConnection","webkitRTCPeerConnection","RTCDataChannel","RTCIceTransport","RTCRtpSender","RTCRtpReceiver"])try{Object.defineProperty(window,k,{value:undefined,configurable:false,writable:false})}catch(e){}` +
+    // The learner copies board references to paste into the terminal: a frame may not write the
+    // clipboard (execCommand copy/cut, the async API, or rewriting a copy). A nested frame could.
+    `try{const ec=Document.prototype.execCommand;Document.prototype.execCommand=function(c,...a){if(/^(copy|cut)$/i.test(String(c))){fail("html artifacts may not write the clipboard");return false}return ec.call(this,c,...a)}}catch(e){}` +
+    `try{Object.defineProperty(Navigator.prototype,"clipboard",{get(){return undefined},configurable:false})}catch(e){}` +
+    `for(const t of ["copy","cut"])addEventListener(t,(e)=>e.stopImmediatePropagation(),true);` +
     `const post=(type,extra)=>{try{parent.postMessage(Object.assign({mathBoard:1,type},extra),"*")}catch(e){}};` +
     `const fail=(message,line)=>{if(++errors>5)return;post("error",{message:String(message).slice(0,300),line:line>OFFSET?line-OFFSET:undefined})};` +
     `addEventListener("error",(e)=>{const t=e.target;if(t&&t!==window&&(t.src||t.href)){fail("could not load "+String(t.src||t.href).split("/").pop());return}` +

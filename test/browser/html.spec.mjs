@@ -114,6 +114,76 @@ test("a frame that freezes some seconds after it got ready does not stall the tu
     const t0 = Date.now();
     const r = await call();
     expect(Date.now() - t0).toBeLessThan(2500);
-    expect(r.png ?? r.issues).toBeTruthy();
+    expect((r.lint ?? r).issues).toEqual([]);
   }
+});
+
+test("the check page loads frames again on every call: no false navigation, no stalled snapshot", async () => {
+  server.update({ scene: { mode: "append", artifacts: [{ type: "html", id: "plain", x: 60, y: 100, width: 300, height: 200, source: "<p>just text</p>" }] } });
+  const lint = () => server.snapshots.lint(), capture = () => server.snapshots.capture({});
+  for (const [i, call] of [lint, capture, capture, lint, capture, capture].entries()) {
+    const t0 = Date.now();
+    const r = await call();
+    const result = r.lint ?? r;
+    expect(result.issues, `call ${i}`).toEqual([]);
+    expect(result.frames.plain, `call ${i}`).not.toBe("error");
+    expect(Date.now() - t0, `call ${i}`).toBeLessThan(5000);
+  }
+});
+
+test("one update with two html artifacts: the tool result names the one that failed, and board_read too", async () => {
+  const { handlers } = await import("../../tools.mjs");
+  const ctx = { server: async () => server, staleWarning: () => "", openHint: "board_open" };
+  const text = (r) => r.content.map((c) => c.text).join("\n");
+  const r = await handlers.board_update(ctx, { baseRevision: server.revision, scene: { mode: "append", artifacts: [
+    { type: "html", id: "fine", x: 60, y: 100, width: 300, height: 200, source: "<p>fine</p>" },
+    { type: "html", id: "loop", x: 500, y: 100, width: 300, height: 200, source: "<script>while (true) {}</script>" },
+  ] } });
+  const out = text(r);
+  expect(out).toMatch(/layout warnings \(1\):\n {2}- artifact loop FAILED TO RENDER: not shown: in the headless check it was not ready within 8 s/);
+  expect(out).not.toMatch(/older warning/);
+  expect(out).toMatch(/\[loop\] html at \(500,100\) 300x200 .*\[not shown: in the headless check/);
+  expect(out).not.toMatch(/\[fine\].*\[(checking|not shown)/);
+  expect(text(await handlers.board_read(ctx, {}))).toMatch(/\[loop\] html .*\[not shown:/);
+});
+
+test("a frame may not write the learner's clipboard", async ({ page, context, browserName }) => {
+  // Playwright's WebKit can't grant clipboard permissions: there the frame's own report is checked.
+  const readable = browserName === "chromium";
+  if (readable) await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(server.url).origin });
+  await open(page);
+  if (readable) await page.evaluate(() => navigator.clipboard.writeText("the learner's own"));
+  server.update({ scene: { mode: "append", artifacts: [{ type: "html", id: "clip", x: 60, y: 100, width: 400, height: 200, source:
+    '<button id="b">copy</button><pre id="o"></pre><script>document.getElementById("b").onclick = () => { const t = document.createElement("textarea"); t.value = "PASTED-BY-FRAME"; document.body.append(t); t.select(); const ok = document.execCommand("copy"); document.getElementById("o").textContent = ok + "/" + typeof navigator.clipboard; };</script>' }] } });
+  const frame = page.frameLocator('[data-frame="clip"] iframe');
+  await frame.locator("#b").click({ timeout: 15000 });
+  await expect(frame.locator("#o")).toHaveText("false/undefined");
+  if (readable) expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("the learner's own");
+  await expect(page.locator('[data-frame="clip"]')).toHaveAttribute("data-error", /html artifacts may not write the clipboard/);
+});
+
+test("a frame that takes 6 s to get ready passes the check and is not stopped in the learner's tab", async ({ page }) => {
+  test.setTimeout(90000);
+  await open(page);
+  server.update({ scene: { mode: "append", artifacts: [{ type: "html", id: "slow", x: 60, y: 100, width: 300, height: 200,
+    source: '<p id="p">loading</p><script>board.wait(); setTimeout(() => { document.getElementById("p").textContent = "ready"; board.ready(); }, 6000);</script>' }] } });
+  await expect(page.frameLocator('[data-frame="slow"] iframe').locator("#p")).toHaveText("ready", { timeout: 30000 });
+  await page.waitForTimeout(500);
+  expect(await page.locator('[data-frame="slow"]').getAttribute("data-error")).toBeNull();
+  await expect(page.locator('[data-frame="slow"] iframe')).toHaveCount(1);
+});
+
+test("a changed artifact shows checking… until its check passes; #html=off loads no frame in that tab", async ({ page, context }) => {
+  await open(page);
+  server.update({ scene: { mode: "append", artifacts: [{ type: "html", id: "h", x: 60, y: 100, width: 300, height: 200, source: "<p>one</p>" }] } });
+  await expect(page.locator('[data-frame="h"] iframe')).toHaveCount(1, { timeout: 15000 });
+  server.update({ baseRevision: server.revision, items: [{ op: "update", id: "h", fields: { source: '<p id="p">two</p><script>board.wait(); setTimeout(() => board.ready(), 2000);</script>' } }] });
+  await expect(page.locator('g[data-id="h"] text')).toHaveText("checking…");
+  await expect(page.frameLocator('[data-frame="h"] iframe').locator("#p")).toHaveText("two", { timeout: 15000 });
+  await expect(page.locator('g[data-id="h"] text')).toHaveCount(0);
+  const off = await context.newPage();
+  await off.goto(`${server.url}&html=off`);
+  await expect(off.locator('g[data-id="h"] text')).toHaveText("html is off in this tab (#html=off)");
+  await off.waitForTimeout(500);
+  await expect(off.locator('[data-frame="h"] iframe')).toHaveCount(0);
 });

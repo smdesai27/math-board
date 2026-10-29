@@ -267,7 +267,7 @@ export const BOARD_DOCS = Object.freeze({
     "window.board: width, height, colors {chalk, muted, yellow, blue, red, green, purple, background}, font. The frame counts as ready just after load; " +
       "if it draws later, call board.wait() at the start and board.ready() once drawn.",
     "The sandbox blocks fetch, XHR, WebSockets, and scripts, images and fonts from URLs, and WebRTC is switched off; there is no access to the board page, " +
-      "cookies or storage, and no forms, popups or navigation. Draw with canvas or SVG, or use data: URLs.",
+      "cookies or storage, no clipboard writes, and no forms, popups or navigation. Draw with canvas or SVG, or use data: URLs.",
     "Checks: a new or changed html artifact is loaded first in the headless layout check, and the learner sees it only if it was ready there within 8 s. " +
       "Script errors (with the line in your source), blocked requests, navigation and a frame that never got ready are reported like a failed artifact: fix and resend.",
     "It draws above the board's other items and takes the pointer and wheel inside its box, so give it its own space. Snapshots and exports show it just after loading.",
@@ -660,7 +660,11 @@ export function buildSchemas(Type) {
  * the detailed layout of one chapter only (focus; default = camera chapter),
  * so long lessons do not flood the context. focus "all" lists everything.
  */
-export function summarizeBoard(board, focus) {
+/**
+ * `frameStates` (BoardServer#frames().frameStates): html artifacts the learner cannot see yet,
+ * shown next to them as [checking] or [not shown: reason].
+ */
+export function summarizeBoard(board, focus, frameStates = {}) {
   const chapters = board?.chapters ?? [];
   const legacy = legacyEquationPositions(board?.equations);
   const all = [
@@ -690,7 +694,8 @@ export function summarizeBoard(board, focus) {
     const where = (it.chapter && f === "all" ? ` {${it.chapter}}` : "") + (it.step ? ` s${it.step}` : "");
     if (it._kind === "artifact")
       items.push(`  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.width)}x${r(it.height)}${it.label ? ` "${it.label}"` : ""}${it.source ? ` (${it.source.length} chars)` : ""}` +
-        `${it.params?.length ? ` sliders: ${it.params.map((p) => `${p.name}=${p.value} in [${p.min}, ${p.max}]`).join(", ")}` : ""}${it.libs?.length ? ` libs: ${it.libs.join(", ")}` : ""}${where}`);
+        `${it.params?.length ? ` sliders: ${it.params.map((p) => `${p.name}=${p.value} in [${p.min}, ${p.max}]`).join(", ")}` : ""}${it.libs?.length ? ` libs: ${it.libs.join(", ")}` : ""}${where}` +
+        `${frameStates[it.id]?.state === "checking" ? " [checking]" : frameStates[it.id]?.state === "failed" ? ` [${frameStates[it.id].reason}]` : ""}`);
     else if (it._kind === "equation")
       items.push(`  [${it.id}] equation at (${r(it._at[0])},${r(it._at[1])}) ${it.label ? `${it.label}: ` : ""}${String(it.latex).slice(0, 80)}${where}`);
     else if (it.points?.length) {
@@ -707,6 +712,14 @@ export function summarizeBoard(board, focus) {
   return summary.length <= 16000
     ? summary
     : summary.slice(0, 16000) + "\n[Summary truncated. Pass a chapter to board_read for detail.]";
+}
+
+/** html artifacts the learner can't see yet (BoardServer#frames), or {} for a server without them. */
+const frameStatesOf = (s) => (typeof s?.frames === "function" ? s.frames(false).frameStates : {});
+/** A tool-result line naming the html artifacts still in their headless check, or "". */
+function checkingLine(s) {
+  const ids = Object.entries(frameStatesOf(s)).filter(([, st]) => st.state === "checking").map(([id]) => id);
+  return ids.length ? `html still being checked (the learner sees it only once it passes; board_read says how it went): ${ids.join(", ")}` : "";
 }
 
 /* ------------------------------------------------------------------ */
@@ -822,7 +835,7 @@ export const handlers = Object.freeze({
       ctx.staleWarning(),
       ...s.notices(),
       `The board is running on 127.0.0.1:${s.port}.${s.restoredFrom ? ` (Restored from the autosave of ${s.restoredFrom}.)` : ""}`,
-      summarizeBoard(board, focus),
+      summarizeBoard(board, focus, frameStatesOf(s)),
       `revision: ${s.revision}`,
       sceneDetail
         ? `scene detail:\n${sceneDetail.length > 24000 ? sceneDetail.slice(0, 24000) + "\n[Truncated. Use board_save then read the saved JSON for the complete scene.]" : sceneDetail}`
@@ -884,8 +897,9 @@ export const handlers = Object.freeze({
             ...s.notices({ once: true }),
             `Board updated to revision ${revision} (was ${before}).`,
             layout,
+            checkingLine(s),
             ...snapshotNotes(s),
-            summarizeBoard(board),
+            summarizeBoard(board, undefined, frameStatesOf(s)),
             viewerLine(ctx, s),
           ]
             .filter(Boolean)

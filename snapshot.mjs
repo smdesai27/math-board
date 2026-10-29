@@ -195,28 +195,35 @@ export class Snapshotter {
     return this.launching;
   }
 
-  /** Wait for the page to show the current revision, with its async rendering done (and `frame`, an html artifact being checked, loaded or failed). */
-  async waitReady(page, timeout = 10000, frame = null) {
+  /**
+   * Wait for the page to show the current revision with its async rendering done. html frames
+   * are not loaded at this point (see waitFrames), so Playwright's own time limits work. With
+   * `refresh`, the page reads the board first (a frame to check may have been chosen since).
+   */
+  async waitReady(page, timeout = 10000, refresh = false) {
     const revision = this.server.revision;
+    if (refresh) await page.evaluate(() => window.__board?.refresh?.());
+    await page.waitForFunction((rev) => window.__board && window.__board.revision >= rev && window.__board.pending === 0, revision, { timeout, polling: 50 });
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    });
+    // Rendering may have started more async work (e.g. a decode); settle again.
+    await page.waitForFunction(() => window.__board.pending === 0, null, { timeout, polling: 50 });
+  }
+  /**
+   * Load html frames (`load`: ids, or null for all) and wait until they are settled, `settle`
+   * (ids) included, within FRAME_CHECK_READY_MS from now. The limit is enforced here: Playwright's
+   * runs inside the page, which a frame stuck in a loop blocks. That error is FRAME_TIMEOUT.
+   */
+  async waitFrames(page, load, settle = []) {
+    if (!this.server.html) return;
     const steps = async () => {
-      // The frame to check was chosen just now, maybe after the page last read the board.
-      if (frame) await page.evaluate(() => window.__board?.refresh?.());
-      await page.waitForFunction(
-        ([rev, id]) => window.__board && window.__board.revision >= rev && window.__board.pending === 0 && (!id || window.__board.frameSettled?.(id)),
-        [revision, frame],
-        { timeout, polling: 50 },
-      );
-      await page.evaluate(async () => {
-        await document.fonts.ready;
-        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      });
-      // Rendering may have started more async work (e.g. a decode); settle again.
-      await page.waitForFunction(() => window.__board.pending === 0, null, { timeout, polling: 50 });
+      await page.evaluate(([ids]) => window.__board?.pauseFrames?.(false, ids), [load]);
+      await page.waitForFunction((ids) => window.__board.pending === 0 && ids.every((id) => window.__board.frameSettled?.(id)), settle, { timeout: FRAME_CHECK_READY_MS, polling: 50 });
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
     };
-    // Playwright's time limits run inside the page, which an html frame stuck in a loop blocks,
-    // so with html frames on the page the limit is enforced here as well.
-    if (this.server.html) await withLimit(steps(), timeout, FRAME_TIMEOUT);
-    else await steps();
+    await withLimit(steps(), FRAME_CHECK_READY_MS, FRAME_TIMEOUT);
   }
 
   /**
@@ -270,13 +277,26 @@ export class Snapshotter {
     });
   }
 
-  /** Measured layout issues for the whole board. */
+  /**
+   * Measured layout issues for the whole board. It also checks the html frames not checked yet,
+   * one after another while the call has time, so an update that adds several gets a result that
+   * names each one.
+   */
   lint({ timeout = LINT_TIMEOUT_MS, signal } = {}) {
-    const work = (frame) => this._lint(frame ? FRAME_CHECK_READY_MS : Math.min(10000, timeout), frame);
-    return this.run(() => this.checking(work, (r) => r.frames), { timeout, signal, label: "layout check" });
+    const work = (frame) => this._lint(Math.min(10000, timeout), frame);
+    return this.run(async () => {
+      const started = Date.now();
+      let result = await this.checking(work, (r) => r.frames);
+      const seen = new Set();
+      for (let next = this.server.frameToCheck?.(); next && !seen.has(next.mac) && Date.now() - started < timeout / 2 && !signal?.aborted; next = this.server.frameToCheck?.()) {
+        seen.add(next.mac);
+        result = await this.checking(work, (r) => r.frames);
+      }
+      return result;
+    }, { timeout, signal, label: "layout check" });
   }
   capture({ region, width, timeout = CAPTURE_TIMEOUT_MS, signal } = {}) {
-    const work = (frame) => this._capture({ region, width, ready: frame ? FRAME_CHECK_READY_MS : undefined, frame });
+    const work = (frame) => this._capture({ region, width, frame });
     return this.run(() => this.checking(work, (r) => r.lint?.frames), { timeout, signal, label: "snapshot" });
   }
   /**
@@ -309,36 +329,37 @@ export class Snapshotter {
 
   async _lint(readyTimeout, frame) {
     const page = await this.ensurePage();
-    await this.pauseFrames(page, false, frame ? [frame] : []);
     try {
-      await this.waitReady(page, readyTimeout, frame);
+      await this.waitReady(page, readyTimeout, Boolean(frame));
+      // A layout check loads only the frame it checks: the others' slots are measured in the SVG.
+      if (frame) await this.waitFrames(page, [frame], [frame]);
       return await page.evaluate((b) => window.__boardLint(b), { x: 0, y: 0, ...BOARD });
     } finally {
       await this.pauseFrames(page, true);
     }
   }
   /**
-   * html frames load in the page only during a call: a layout check loads just the frame it
-   * checks (`ids`), a snapshot loads all of them (`ids` null), and between calls none is loaded,
-   * so no model code runs (or stalls the page) while the headless browser waits.
+   * html frames load in the page only during a call (waitFrames): a layout check loads just the
+   * frame it checks, a snapshot all of them. After each call they are unloaded again, so no model
+   * code runs (or stalls the page) while the headless browser waits.
    */
-  async pauseFrames(page, paused, ids = null) {
+  async pauseFrames(page, paused) {
     if (!this.server.html || page.isClosed?.()) return;
-    await withLimit(page.evaluate(([p, i]) => window.__board?.pauseFrames?.(p, i), [paused, ids]), 2000).catch(() => {});
+    await withLimit(page.evaluate((p) => window.__board?.pauseFrames?.(p), paused), 2000).catch(() => {});
   }
 
   /**
    * Capture the board (or a board-space region, for zooming in on detail).
    * Returns { png: Buffer, lint, region }.
    */
-  async _capture({ region, width, ready, frame } = {}) {
+  async _capture({ region, width, frame } = {}) {
     const page = await this.ensurePage();
-    await this.pauseFrames(page, false, null);
-    await this.waitReady(page, ready, frame);
     const r = region ?? { x: 0, y: 0, ...BOARD };
     const w = Math.round(Math.max(200, Math.min(2400, width ?? BOARD.w)));
     const h = Math.round(Math.max(100, Math.min(2400, (w * r.h) / r.w)));
+    let stalled = false;
     try {
+      await this.waitReady(page, 10000, Boolean(frame));
       if (region) {
         await page.setViewportSize({ width: w, height: h });
         await page.evaluate((v) => window.__setView(v.x, v.y, v.w, v.h), r);
@@ -346,12 +367,15 @@ export class Snapshotter {
       } else if (w !== BOARD.w) {
         await page.setViewportSize({ width: w, height: h });
       }
+      // A snapshot shows every frame: load them all now, with their own time limit.
+      await this.waitFrames(page, null, frame ? [frame] : []).catch((err) => { stalled = err?.name === FRAME_TIMEOUT; throw err; });
       const png = await page.screenshot({ type: "png" });
       const lint = await page.evaluate((b) => window.__boardLint(b), { x: 0, y: 0, ...BOARD });
       return { png, lint, region: r };
     } finally {
-      await this.pauseFrames(page, true);
-      if (!page.isClosed() && (region || w !== BOARD.w)) {
+      // A page a frame has stalled is thrown away by the caller; don't wait on it here.
+      if (!stalled) await this.pauseFrames(page, true);
+      if (!stalled && !page.isClosed() && (region || w !== BOARD.w)) {
         await page.setViewportSize({ width: BOARD.w, height: BOARD.h }).catch(() => {});
         if (region) await page.evaluate((b) => window.__setView(0, 0, b.w, b.h), BOARD).catch(() => {});
       }
