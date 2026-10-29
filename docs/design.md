@@ -12,6 +12,8 @@ It also keeps the roles clear. The conversation and the learner's answers stay i
 
 What I can do on the page: pan, zoom, step back and forward, replay a chapter, see the whole lesson, follow the tutor's camera. Hovering an item shows `step n · id · chapter`, and a click copies it, so I can say "step 4, eq2" in the terminal without the page ever talking to the model. Clear and Save are the only buttons that write, and Clear asks again if the board changed while I was deciding.
 
+Sliders on a plot are the one control that changes what an item shows. They still don't write: the values live in my tab, so the tutor, the snapshots and other tabs see each slider where the tutor set it, and a click on the plot copies a reference with my values, so I can say "with w = 4.5" in the terminal. The expressions they feed are the same JSON the server checked; moving a slider runs no new code.
+
 Because the page never talks to the model, the tutor can't tell on its own whether I'm watching. The server can, so read, update and load results end with "No browser is showing the board" when nobody is, and the tutor knows to call `board_open` instead of drawing for an empty room. The headless page behind the layout checks doesn't count as a viewer.
 
 ## One implementation, two adapters

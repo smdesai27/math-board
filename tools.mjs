@@ -61,6 +61,8 @@ export const BOARD_TEACHING = [
   "Rhythm: read the board (board_read), draw one step (board_update), ask one check question in the terminal " +
     "and wait for the answer, then continue.",
   "",
+  "To show how something changes with a parameter, give the plot a slider (params) and ask the learner to move it.",
+  "",
   "Keep one concept per chapter: start a new chapter for a new concept and use the camera to move the learner there. " +
     "Keep board text short (labels, key equations, a few words) and put the explanation in the terminal.",
   "",
@@ -104,7 +106,7 @@ export const BOARD_DOCS = Object.freeze({
     "What you can draw, by topic:",
     "- equations: KaTeX math, \\color, \\boxed, \\cancel, chemistry with \\ce{...}",
     "- marks: lines, arrows, freehand curves, rectangles, ellipses, text",
-    "- plot: function graphs, parametric curves, shaded areas, points, asymptotes",
+    "- plot: function graphs, parametric curves, shaded areas, points, asymptotes, and sliders the learner drags or plays (params)",
     "- svg: hand-written SVG diagrams (markers, gradients, symbols, CSS, SMIL animation)",
     "- mermaid: flowcharts, sequence, state, class and ER diagrams, mind maps, timelines (automatic layout)",
     "- molecule: 2D structures from SMILES",
@@ -177,13 +179,19 @@ export const BOARD_DOCS = Object.freeze({
   ].join("\n"),
 
   plot: [
-    "{type:\"plot\", x, y, width, height, xRange:[a,b] (default [-10,10]), yRange?:[c,d] (default: fitted), functions?, parametric?, areas?, points?, " +
+    "{type:\"plot\", x, y, width, height, xRange:[a,b] (default [-10,10]), yRange?:[c,d] (default: fitted), params?, functions?, parametric?, areas?, points?, " +
       "vlines?, hlines?, xLabel?, yLabel?, title?, grid?, axes?, ticks? (all true by default; false hides), equalAspect? (true = same scale on both axes, for circles and geometry)}",
     "- functions: up to 12 of {expr:\"sin(x)\", label?, color?, dash?, width?, domain?:[a,b]}",
     "- parametric: up to 8 of {x:\"cos(t)\", y:\"sin(t)\", t:[0,6.283] (default [0, 2pi]), label?, color?, dash?, width?}",
     "- areas: up to 6 of {expr, from, to, lower?:\"expr\"}: shades between expr and lower (default the x axis)",
     "- points: up to 200 of {x, y, label?, color?, size?}; vlines / hlines: up to 12 of {x} / {y} with label?, color?, dash? (asymptotes, markers)",
     "At least one of functions, parametric, points or areas is required. Curves are traced (default reveal \"draw\").",
+    "Sliders: params, up to 6 of {name, min, max, value? (default min), step?, label?, period? (seconds per sweep when played, default 4)}. " +
+      "Each is a row under the plot that the learner drags, or plays with its ▶ button (min to max and back), and the plot redraws live. " +
+      "A name (\"a\", \"omega\"; not x, t, a constant or a function) can be used in every expression of the plot, and as a point, vline or hline coordinate " +
+      "or an area's from/to: {x:\"a\", y:\"sin(a)\"}, {expr:\"sin(x)\", from:0, to:\"a\"}. A point with drag:true whose x and/or y is just a slider name can be dragged, " +
+      "which moves that slider. Each slider row takes 34 px of the plot's height (a height too small to leave a plot is rejected with the size needed). The fitted y range covers every slider's ends, or give yRange. " +
+      "Snapshots, other tabs and board_read show each slider at its value; when the learner clicks the plot, the reference they copy includes their values.",
     "Expressions: numbers, the variable x (t in parametric), + - * / ^ (or **), unary minus, parentheses, implicit multiplication (2x, 3(x+1), 2pi), " +
       "constants pi, e, tau, and the functions sin cos tan asin acos atan sinh cosh tanh asinh acosh atanh sec csc cot exp ln log (base 10) log2 log10 " +
       "sqrt cbrt abs sign floor ceil round min max pow atan2 hypot mod step (Heaviside) sinc gauss(x, mu, sigma). Unknown names are errors; at most 500 characters.",
@@ -191,6 +199,10 @@ export const BOARD_DOCS = Object.freeze({
     'Example: {"type":"plot","id":"p1","x":60,"y":120,"width":560,"height":360,"xRange":[-6.3,6.3],' +
       '"functions":[{"expr":"sin(x)","label":"sin x"},{"expr":"x^2/8 - 1","dash":"7 5","color":"#f2c14e"}],' +
       '"areas":[{"expr":"sin(x)","from":0,"to":3.14159}],"points":[{"x":0,"y":0,"label":"O"}],"xLabel":"x","yLabel":"y"}',
+    'Slider example (free induction decay): {"type":"plot","id":"fid","x":60,"y":100,"width":640,"height":440,"xRange":[0,10],"yRange":[-1.1,1.1],' +
+      '"params":[{"name":"w","min":0.5,"max":6,"value":3,"label":"ω"},{"name":"T2","min":0.5,"max":8,"value":3,"label":"T₂"}],' +
+      '"functions":[{"expr":"exp(-x/T2) cos(w x)","label":"Mx"},{"expr":"exp(-x/T2)","dash":"6 5","color":"#8a8578"}],' +
+      '"points":[{"x":"T2","y":"exp(-1)","label":"1/e","drag":true}],"xLabel":"t","yLabel":"signal"}',
   ].join("\n"),
 
   svg: [
@@ -648,7 +660,8 @@ export function summarizeBoard(board, focus) {
   for (const it of shown) {
     const where = (it.chapter && f === "all" ? ` {${it.chapter}}` : "") + (it.step ? ` s${it.step}` : "");
     if (it._kind === "artifact")
-      items.push(`  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.width)}x${r(it.height)}${it.label ? ` "${it.label}"` : ""}${it.source ? ` (${it.source.length} chars)` : ""}${where}`);
+      items.push(`  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.width)}x${r(it.height)}${it.label ? ` "${it.label}"` : ""}${it.source ? ` (${it.source.length} chars)` : ""}` +
+        `${it.params?.length ? ` sliders: ${it.params.map((p) => `${p.name}=${p.value} in [${p.min}, ${p.max}]`).join(", ")}` : ""}${where}`);
     else if (it._kind === "equation")
       items.push(`  [${it.id}] equation at (${r(it._at[0])},${r(it._at[1])}) ${it.label ? `${it.label}: ` : ""}${String(it.latex).slice(0, 80)}${where}`);
     else if (it.points?.length) {
