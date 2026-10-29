@@ -104,3 +104,20 @@ test("board_open gives the URL with its token only when no browser shows the boa
   assert.match(openText({ url, port: 5 }), new RegExp(`^Board: ${url.replace(/[.#/]/g, "\\$&")} \\(not opened automatically; give the learner this URL\\)\\.`));
   assert.match(openText({ url, port: 5, notices: ["WARNING: x"], activationError: "nope" }), /^WARNING: x\n[\s\S]*Could not activate the board tools: nope$/);
 });
+
+test("board_snapshot lists the measured boxes of the region it shows, not the whole board", async (t) => {
+  const { s, ctx, text } = await setup(t);
+  s.update({ chapters: [{ op: "add", id: "a", title: "A", x: 0, y: 0 }, { op: "add", id: "b", title: "B", x: 1400, y: 0 }] });
+  const items = [
+    { id: "in1", kind: "text", chapter: "a", x: 100, y: 100, w: 50, h: 20 },
+    { id: "edge", kind: "text", chapter: "a", x: 1180, y: 100, w: 60, h: 20 },
+    { id: "out1", kind: "text", chapter: "b", x: 1500, y: 100, w: 50, h: 20 },
+    { id: "out2", kind: "artifact", chapter: "b", x: 1600, y: 300, w: 300, h: 200 },
+  ];
+  s.snapshots.capture = async ({ region }) => ({ png: Buffer.from("png"), lint: { items, issues: [] }, region });
+  const a = text(await handlers.board_snapshot(ctx, { chapter: "a" }));
+  assert.match(a, /measured boxes in this region:\n {2}\[in1\] text 100,100 50x20\n {2}\[edge\] text 1180,100 60x20\n\(2 more outside this region; snapshot their chapter for theirs\)/);
+  assert.doesNotMatch(a, /out1|out2/);
+  const empty = text(await handlers.board_snapshot(ctx, { region: { x: 5000, y: 5000, w: 600, h: 400 } }));
+  assert.match(empty, /nothing in this region \(4 items elsewhere on the board\)\./);
+});

@@ -87,6 +87,7 @@ export const DOC_TOPICS = Object.freeze([
   "mermaid",
   "molecule",
   "icon",
+  "html",
   "animation",
   "layout",
   "saves",
@@ -111,6 +112,7 @@ export const BOARD_DOCS = Object.freeze({
     "- mermaid: flowcharts, sequence, state, class and ER diagrams, mind maps, timelines (automatic layout)",
     "- molecule: 2D structures from SMILES",
     "- icon: anatomy, organs, cells, microbes, viruses, DNA, plants, animals, lab equipment",
+    "- html: your own HTML and JavaScript in a sandbox (3D scenes, simulations), only on boards started with MATH_BOARD_HTML=1",
     "Style (black board, chalk colors; keep it consistent): chalk white #e8e3d9 for main lines and text, muted #8a8578 for axes and guides; " +
       "accents yellow #f2c14e, blue #5fb3d9, red #ef6f6c, green #8de0be, purple #c39bd3; at most 3-4 accents per diagram.",
     "Other topics: workflow, chapters, animation, layout, saves.",
@@ -251,6 +253,35 @@ export const BOARD_DOCS = Object.freeze({
     ARTIFACT_COMMON,
     'Example: {"type":"icon","id":"heart","icon":"heart-cross-section-2","x":700,"y":100,"width":260,"card":true,"label":"Heart"}',
     "CC-BY icons need attribution if the material is published (public/icons/CREDITS.md).",
+  ].join("\n"),
+
+  html: [
+    "{type:\"html\", x, y, width, height, source, libs?}: your own HTML and JavaScript, for what a plot (with params for sliders), svg or " +
+      "mermaid cannot show: a 3D scene the learner turns (a Bloch sphere, field lines), a simulation, a custom interactive diagram. " +
+      "Use plot params when a slider on a curve is enough: they cost far fewer tokens.",
+    "Only on boards the learner started with MATH_BOARD_HTML=1; elsewhere an html artifact is rejected.",
+    "source: the inside of <body> (elements, <style>, classic <script>), at most 64 KiB. It runs in a sandboxed frame of exactly width x height CSS px " +
+      "over the black board: transparent background, chalk text, serif font.",
+    "libs (loaded before your source): three (window.THREE, with THREE.OrbitControls), d3 (window.d3), matter (window.Matter: 2D physics), " +
+      "lil-gui (window.lil.GUI: slider panels), fft (window.FFT: fft.js), katex (window.katex, with \\ce; its CSS too).",
+    "window.board: width, height, colors {chalk, muted, yellow, blue, red, green, purple, background}, font. The frame counts as ready just after load; " +
+      "if it draws later, call board.wait() at the start and board.ready() once drawn.",
+    "The sandbox blocks fetch, XHR, WebSockets, and scripts, images and fonts from URLs, and WebRTC is switched off; there is no access to the board page, " +
+      "cookies or storage, no clipboard writes, and no forms, popups or navigation. Draw with canvas or SVG, or use data: URLs.",
+    "Checks: a new or changed html artifact is loaded first in the headless layout check, and the learner sees it only if it was ready there within 8 s. " +
+      "Script errors (with the line in your source), blocked requests, navigation and a frame that never got ready are reported like a failed artifact: fix and resend.",
+    "It draws above the board's other items and takes the pointer and wheel inside its box, so give it its own space. Snapshots and exports show it just after loading.",
+    "The layout check measures an html artifact as one box: it can't see overlaps or clipped text inside it, so look at a board_snapshot of its chapter after drawing one. " +
+      "A snapshot can't click or drag either: keep controls simple, and ask the learner to try them.",
+    ARTIFACT_COMMON,
+    "Example: " + JSON.stringify({
+      type: "html", id: "bloch", x: 60, y: 100, width: 560, height: 480, libs: ["three"],
+      source: "<script>\nconst r = new THREE.WebGLRenderer({ antialias: true, alpha: true });\nr.setSize(board.width, board.height);\ndocument.body.appendChild(r.domElement);\n" +
+        "const scene = new THREE.Scene(), cam = new THREE.PerspectiveCamera(40, board.width / board.height, 0.1, 100);\ncam.position.set(3, 2, 3); cam.lookAt(0, 0, 0);\n" +
+        "new THREE.OrbitControls(cam, r.domElement);\nscene.add(new THREE.Mesh(new THREE.SphereGeometry(1, 32, 24), new THREE.MeshBasicMaterial({ color: board.colors.muted, wireframe: true })));\n" +
+        "const m = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1, board.colors.blue);\nscene.add(m);\n" +
+        "let t = 0;\n(function frame() { t += 0.02; m.setDirection(new THREE.Vector3(Math.cos(t), 0.5, Math.sin(t)).normalize()); r.render(scene, cam); requestAnimationFrame(frame); })();\n</script>",
+    }),
   ].join("\n"),
 
   animation: [
@@ -631,7 +662,11 @@ export function buildSchemas(Type) {
  * the detailed layout of one chapter only (focus; default = camera chapter),
  * so long lessons do not flood the context. focus "all" lists everything.
  */
-export function summarizeBoard(board, focus) {
+/**
+ * `frameStates` (BoardServer#frames().frameStates): html artifacts the learner cannot see yet,
+ * shown next to them as [checking] or [not shown: reason].
+ */
+export function summarizeBoard(board, focus, frameStates = {}) {
   const chapters = board?.chapters ?? [];
   const legacy = legacyEquationPositions(board?.equations);
   const all = [
@@ -661,7 +696,8 @@ export function summarizeBoard(board, focus) {
     const where = (it.chapter && f === "all" ? ` {${it.chapter}}` : "") + (it.step ? ` s${it.step}` : "");
     if (it._kind === "artifact")
       items.push(`  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.width)}x${r(it.height)}${it.label ? ` "${it.label}"` : ""}${it.source ? ` (${it.source.length} chars)` : ""}` +
-        `${it.params?.length ? ` sliders: ${it.params.map((p) => `${p.name}=${p.value} in [${p.min}, ${p.max}]`).join(", ")}` : ""}${where}`);
+        `${it.params?.length ? ` sliders: ${it.params.map((p) => `${p.name}=${p.value} in [${p.min}, ${p.max}]`).join(", ")}` : ""}${it.libs?.length ? ` libs: ${it.libs.join(", ")}` : ""}${where}` +
+        `${frameStates[it.id]?.state === "checking" ? " [checking]" : frameStates[it.id]?.state === "failed" ? ` [${frameStates[it.id].reason}]` : ""}`);
     else if (it._kind === "equation")
       items.push(`  [${it.id}] equation at (${r(it._at[0])},${r(it._at[1])}) ${it.label ? `${it.label}: ` : ""}${String(it.latex).slice(0, 80)}${where}`);
     else if (it.points?.length) {
@@ -678,6 +714,14 @@ export function summarizeBoard(board, focus) {
   return summary.length <= 16000
     ? summary
     : summary.slice(0, 16000) + "\n[Summary truncated. Pass a chapter to board_read for detail.]";
+}
+
+/** html artifacts the learner can't see yet (BoardServer#frames), or {} for a server without them. */
+const frameStatesOf = (s) => (typeof s?.frames === "function" ? s.frames(false).frameStates : {});
+/** A tool-result line naming the html artifacts still in their headless check, or "". */
+function checkingLine(s) {
+  const ids = Object.entries(frameStatesOf(s)).filter(([, st]) => st.state === "checking").map(([id]) => id);
+  return ids.length ? `html still being checked (the learner sees it only once it passes; board_read says how it went): ${ids.join(", ")}` : "";
 }
 
 /* ------------------------------------------------------------------ */
@@ -793,7 +837,7 @@ export const handlers = Object.freeze({
       ctx.staleWarning(),
       ...s.notices(),
       `The board is running on 127.0.0.1:${s.port}.${s.restoredFrom ? ` (Restored from the autosave of ${s.restoredFrom}.)` : ""}`,
-      summarizeBoard(board, focus),
+      summarizeBoard(board, focus, frameStatesOf(s)),
       `revision: ${s.revision}`,
       sceneDetail
         ? `scene detail:\n${sceneDetail.length > 24000 ? sceneDetail.slice(0, 24000) + "\n[Truncated. Use board_save then read the saved JSON for the complete scene.]" : sceneDetail}`
@@ -855,8 +899,9 @@ export const handlers = Object.freeze({
             ...s.notices({ once: true }),
             `Board updated to revision ${revision} (was ${before}).`,
             layout,
+            checkingLine(s),
             ...snapshotNotes(s),
-            summarizeBoard(board),
+            summarizeBoard(board, undefined, frameStatesOf(s)),
             viewerLine(ctx, s),
           ]
             .filter(Boolean)
@@ -880,12 +925,17 @@ export const handlers = Object.freeze({
     if (!region && params.overview && board.chapters?.length) region = overviewRegion(board.chapters);
     region ??= cameraRect(board);
     const shot = await s.snapshots.capture({ region, width: params.width, signal: ctx.signal });
-    const { items, issues } = shot.lint;
+    const { items: all, issues } = shot.lint;
+    // Only the items this snapshot shows (a chapter's snapshot lists that chapter, not the board).
+    const items = all.filter((i) => i.x < region.x + region.w && i.x + i.w > region.x && i.y < region.y + region.h && i.y + i.h > region.y);
+    const elsewhere = all.length - items.length;
     const text = [
       ctx.staleWarning(),
       `Snapshot of revision ${s.revision} (board region ${Math.round(region.x)},${Math.round(region.y)} ${Math.round(region.w)}x${Math.round(region.h)}). Measured boxes are in board coordinates; a chapter item's local coords = board coords minus the chapter origin.`,
       issues.length ? `layout warnings (${issues.length}):\n${issues.slice(0, 40).map((i) => `  - ${i}`).join("\n")}${issues.length > 40 ? `\n  ... ${issues.length - 40} more` : ""}` : "layout check: no overlaps or off-board items.",
-      items.length ? `measured boxes:\n${items.slice(0, 120).map((i) => `  [${i.id}] ${i.kind} ${i.x},${i.y} ${i.w}x${i.h}`).join("\n")}` : "board is empty.",
+      items.length
+        ? `measured boxes in this region:\n${items.slice(0, 120).map((i) => `  [${i.id}] ${i.kind} ${i.x},${i.y} ${i.w}x${i.h}`).join("\n")}${elsewhere ? `\n(${elsewhere} more outside this region; snapshot their chapter for theirs)` : ""}`
+        : all.length ? `nothing in this region (${all.length} items elsewhere on the board).` : "board is empty.",
       ...snapshotNotes(s),
     ].filter(Boolean).join("\n");
     return {
@@ -951,8 +1001,11 @@ export const handlers = Object.freeze({
 
   async board_docs(_ctx, params) {
     const topic = params.topic;
-    const text = Object.hasOwn(BOARD_DOCS, topic) ? BOARD_DOCS[topic] : undefined;
+    let text = Object.hasOwn(BOARD_DOCS, topic) ? BOARD_DOCS[topic] : undefined;
     if (!text) throw new Error(`unknown topic "${String(params.topic)}"; one of: ${DOC_TOPICS.join(", ")}`);
+    // Whether html artifacts work here (the same environment starts the board server).
+    if (topic === "overview" || topic === "html")
+      text += `\nhtml artifacts on this board: ${process.env.MATH_BOARD_HTML === "1" ? "on" : "OFF (the learner has not set MATH_BOARD_HTML=1; do not use them)"}.`;
     return { content: [{ type: "text", text: `board_docs ${topic}:\n${text}` }], details: { topic } };
   },
 });

@@ -52,7 +52,7 @@ Why: asking a model to look at a screenshot and say what's wrong is slow, spends
 
 ## Small at rest
 
-Not every pi session is a lesson, so an unused board shouldn't tax every turn. In pi only `board_open` is active until the board is opened: 255 characters per turn instead of 12,197 for all seven tools. The long reference (artifact formats, SVG rules, plot grammar, animation, layout) lives in `board_docs`, which the tutor fetches by topic before it uses a format for the first time. The `board_teaching` section is constant text, so the prompt cache holds.
+Not every pi session is a lesson, so an unused board shouldn't tax every turn. In pi only `board_open` is active until the board is opened: 255 characters per turn instead of 12,204 for all seven tools. The long reference (artifact formats, SVG rules, plot grammar, animation, layout) lives in `board_docs`, which the tutor fetches by topic before it uses a format for the first time. The `board_teaching` section is constant text, so the prompt cache holds.
 
 ## Strict input, honest reports
 
@@ -70,12 +70,22 @@ Lessons live in a folder on my machine too. A checkout keeps them in `.data/` ne
 
 It also keeps the security story short: loopback, a token, and a page that only renders validated data. [SECURITY.md](../SECURITY.md) has the details.
 
+## html artifacts: code, fenced in, off by default
+
+Some things don't fit any declarative format: a 3D model you can turn, a pendulum that actually swings. For those the model can write HTML and JavaScript, the way Claude's artifacts work, if I start the board with `MATH_BOARD_HTML=1`. Sliders on plots come first, though: they cover most "what happens when this changes" questions at a fraction of the tokens, and nothing in them runs.
+
+Why off by default: it reverses the rule above, it costs the tutor thousands of output tokens per diagram, it's the one part of the board where a mistake can freeze my tab, and the sandbox can't close every network path (WebRTC from a nested frame gets out; see SECURITY.md), so a prompt-injected artifact could leak what's in it. Turning it on is a decision I make for my own setup.
+
+How it's fenced: each artifact gets a sandboxed frame with an opaque origin, served with its own policy that blocks network requests, that can load only the libraries the board ships (three.js, d3, matter.js, lil-gui, fft.js, KaTeX), so a 3D scene is 30 lines instead of 300. The frames live in a layer over the board rather than inside the SVG, because Safari neither scales nor places a frame inside `foreignObject`; a small sync step puts each one over its slot on every pan, zoom, step and fade.
+
+A frame can't hurt the board page, but it can block it: sandboxed frames from the same host share the page's process in Safari and Chromium, so `while (true) {}` freezes the tab. Each new frame therefore runs first in the headless layout check, one at a time, and my browser gets it only after it reported ready there; a layout check goes through every new frame its update added, so the tutor hears about each one in that update's result. That catches mistakes, not code written to slip past it, so a frozen tab has a way out: `&html=off` after the token loads no frame in that tab. The check page loads frames only during its calls (a layout check just the one it checks, a snapshot all of them) and unloads them afterwards, so no model code runs there between calls, and my own tab loads a frame only when its chapter comes near the screen.
+
 ## What I left out on purpose
 
 - **Human drawing.** See above. If I want to say something, I say it in the terminal, where the tutor reads it.
 - **Automatic export.** `/board export` runs only when I type it: never on shutdown, never on autosave, never from a model tool. Lessons I want to keep, I keep on purpose. I don't want a folder of every board I ever opened.
 - **Cloud anything.** No accounts, no sync service, no hosted rendering, no bundled model with its own keys. The voice-first tutors I looked at all do this, and it's exactly why none of them can be reached from pi.
-- **Model-written code.** Manim-style generators have the model write code that then runs. Here the model sends JSON that gets validated. It's less expressive, and nothing the model writes is executed.
+- **Model-written code, by default.** Manim-style generators have the model write code that then runs. Here the model sends JSON that gets validated. It's less expressive, and nothing the model writes is executed, unless I turn on html artifacts (below).
 
 ## Open
 

@@ -364,6 +364,7 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
               [
                 `Board server: running at 127.0.0.1:${server.port} (rev ${server.revision}, started ${server.startedAt}${server.restoredFrom ? `, restored autosave from ${server.restoredFrom}` : ""}, ${server.getState().chapters?.length ?? 0} chapters, ${viewerCount(server)} browser${viewerCount(server) === 1 ? "" : "s"} watching)`,
                 `  data folder: ${server.dataDir}`,
+                `  html artifacts: ${server.html ? "on (MATH_BOARD_HTML=1)" : "off (start pi with MATH_BOARD_HTML=1 to allow them)"}`,
                 ...notices.map((n: string) => `  ${n}`),
                 server.url,
               ].join("\n"),
