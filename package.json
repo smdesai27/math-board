@@ -1,6 +1,6 @@
 {
   "name": "pi-math-board",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A view-only chalkboard in the browser that a terminal tutor draws on: equations, plots, molecules, diagrams and science illustrations, built up one step at a time. A pi extension and an MCP server.",
   "keywords": [
     "pi-package",

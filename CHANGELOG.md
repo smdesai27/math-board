@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 (2026-10-30)
+
+Documentation changes only. No code changes.
+
 ## 0.3.0 (2026-10-27)
 
 The first public release. Everything before it was unreleased and were never released.

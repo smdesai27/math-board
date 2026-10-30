@@ -6,15 +6,15 @@
   "repository": {
     "url": "https://github.com/smdesai27/math-board",
     "source": "github",
-    "id": "1436120036"
+    "id": "1440062933"
   },
   "websiteUrl": "https://github.com/smdesai27/math-board#readme",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "pi-math-board",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "transport": {
         "type": "stdio"
       },
