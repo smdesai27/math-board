@@ -12,6 +12,10 @@
 
 - `board_snapshot` lists the measured boxes of the items in the region it shows (a chapter, a region, the camera view), not every item on the board, and says how many are elsewhere.
 
+## 0.3.1 (2026-10-30)
+
+Documentation changes only. No code changes.
+
 ## 0.3.0 (2026-10-27)
 
 The first public release. Everything before it was unreleased and were never released.
