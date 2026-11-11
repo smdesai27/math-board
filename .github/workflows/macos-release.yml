@@ -28,7 +28,7 @@ jobs:
       - name: Verify app and archive
         run: |
           codesign --verify --deep --strict 'app/build/Math Board.app'
-          lipo -verify_arch arm64 x86_64 'app/build/Math Board.app/Contents/MacOS/MathBoard'
+          lipo 'app/build/Math Board.app/Contents/MacOS/MathBoard' -verify_arch arm64 x86_64
           plutil -lint 'app/build/Math Board.app/Contents/Info.plist'
           test -s 'app/build/Math Board.app/Contents/Resources/MathBoard.icns'
           test -s 'app/build/Math Board.app/Contents/Resources/Agent Setup.md'
