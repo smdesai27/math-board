@@ -121,3 +121,12 @@ test("board_snapshot lists the measured boxes of the region it shows, not the wh
   const empty = text(await handlers.board_snapshot(ctx, { region: { x: 5000, y: 5000, w: 600, h: 400 } }));
   assert.match(empty, /nothing in this region \(4 items elsewhere on the board\)\./);
 });
+
+test("parallel updates: each result describes the revision it names", async (t) => {
+  const { ctx, text } = await setup(t);
+  const add = (id) => handlers.board_update(ctx, { equations: [{ op: "add", id, latex: "x" }], check: false });
+  const [a, b] = (await Promise.all([add("first"), add("second")])).map(text);
+  assert.match(a, /revision 1 \(was 0\)/);
+  assert.doesNotMatch(a, /\[second\]/, "the first result does not list what the second call added");
+  assert.match(b, /\[first\][\s\S]*\[second\]/);
+});

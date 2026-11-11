@@ -149,3 +149,45 @@ test("an aborted signal cancels the call", async () => {
   await assert.rejects(snap.capture({ signal: AbortSignal.abort() }), { name: "AbortError" });
   await snap.close();
 });
+
+test("a call still running when the server stops does not start another page", async () => {
+  const srv = { url: "http://127.0.0.1:1/#token=x", revision: 0 };
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const chromium = fakeChromium({
+    page: () => {
+      const page = fakePage();
+      page.waitForFunction = async () => {
+        await gate;
+        throw new Error("page.waitForFunction: Target closed");
+      };
+      return page;
+    },
+  });
+  const snaps = new Snapshotter(srv, { chromium });
+  const call = snaps.lint();
+  await new Promise((r) => setTimeout(r, 10));
+  srv.url = null; // BoardServer#stop
+  release();
+  await assert.rejects(call, /the board server is stopped/);
+  assert.equal(chromium.launches.length, 1);
+  assert.equal(chromium.browsers[0].pages.length, 1);
+  await snaps.close();
+});
+
+test("a page that cannot load the board is closed, not left open", async () => {
+  let made;
+  const chromium = fakeChromium({
+    page: () => {
+      made = fakePage();
+      made.goto = async () => {
+        throw new Error("page.goto: net::ERR_CONNECTION_REFUSED");
+      };
+      return made;
+    },
+  });
+  const snaps = new Snapshotter(server, { chromium });
+  await assert.rejects(snaps.lint(), /ERR_CONNECTION_REFUSED/);
+  assert.equal(made.isClosed(), true);
+  await snaps.close();
+});

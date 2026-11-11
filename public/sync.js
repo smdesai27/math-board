@@ -5,8 +5,10 @@
  * board is shown, and the caller asks the learner again.
  */
 export class BoardSync {
-  constructor({ request, render, status }) {
-    Object.assign(this, { request, render, status });
+  constructor({ request, render, status, retry = [1000, 2000, 4000, 8000] }) {
+    Object.assign(this, { request, render, status, retry });
+    this.retries = 0; // failed reads in a row
+    this.retryTimer = 0;
     this.revision = -1; // revision on screen
     this.board = null;
     this.remoteRevision = -1; // newest revision the server has announced
@@ -37,10 +39,27 @@ export class BoardSync {
   refresh() {
     return this.enqueue(() => this.read(true));
   }
+  /**
+   * A read for an announced revision. One that fails is tried again a few times, so one lost
+   * request never leaves an older board on screen until the next change.
+   */
+  follow(force) {
+    return this.enqueue(async () => {
+      try {
+        await this.read(force);
+        this.retries = 0;
+      } catch (err) {
+        const wait = this.retry[this.retries++];
+        clearTimeout(this.retryTimer);
+        if (wait !== undefined) this.retryTimer = setTimeout(() => this.follow(force).catch(() => {}), wait);
+        throw err;
+      }
+    });
+  }
   /** The server announced `revision`: read the board if it is newer than the one on screen. */
   remote(revision) {
     this.remoteRevision = Math.max(this.remoteRevision, revision);
-    return this.enqueue(() => this.read());
+    return this.follow(false);
   }
   /**
    * First event after the event stream came back. The server may have restarted (same port and
@@ -48,7 +67,7 @@ export class BoardSync {
    */
   resync(revision) {
     this.remoteRevision = revision;
-    return this.enqueue(() => this.read(true));
+    return this.follow(true);
   }
   /**
    * POST a write based on the revision on screen. Resolves { ok: true, data } on success, or
@@ -77,10 +96,13 @@ export class BoardSync {
  * `stoppedAfter` ms without a connection it reports the board server as stopped (the page then
  * says how to reopen it) but keeps retrying, so a server that comes back on the same port with the
  * same token reconnects the tab by itself. States: connecting, connected, reconnecting, stopped.
+ * With `quietAfter`, a stream that delivers nothing for that long (the server pings well within
+ * it) counts as dropped: a connection can die without the browser reporting an error.
  */
 export class LiveEvents {
-  constructor({ open, onEvent, onState, stoppedAfter = 10000, backoff = [500, 1000, 2000, 4000, 5000] }) {
-    Object.assign(this, { open, onEvent, onState, stoppedAfter, backoff });
+  constructor({ open, onEvent, onState, stoppedAfter = 10000, backoff = [500, 1000, 2000, 4000, 5000], quietAfter = 0 }) {
+    Object.assign(this, { open, onEvent, onState, stoppedAfter, backoff, quietAfter });
+    this.quietTimer = 0;
     this.state = "connecting";
     this.source = null;
     this.failures = 0;
@@ -108,8 +130,13 @@ export class LiveEvents {
       return this.failed(null);
     }
     this.source = source;
+    const heard = () => {
+      clearTimeout(this.quietTimer);
+      if (this.quietAfter) this.quietTimer = setTimeout(() => { if (source === this.source) this.failed(source); }, this.quietAfter);
+    };
     source.onopen = () => {
       if (source !== this.source) return;
+      heard();
       clearTimeout(this.stopTimer);
       this.stopTimer = 0;
       this.failures = 0;
@@ -119,12 +146,14 @@ export class LiveEvents {
     };
     source.onmessage = (e) => {
       if (source !== this.source) return;
+      heard();
       let data;
       try {
         data = JSON.parse(e.data);
       } catch {
         return;
       }
+      if (data?.type === "ping") return;
       const resync = this.fresh;
       this.fresh = false;
       this.onEvent(data, { resync });
@@ -137,6 +166,7 @@ export class LiveEvents {
   }
   failed(source) {
     source?.close();
+    clearTimeout(this.quietTimer);
     this.source = null;
     this.outage = true;
     if (this.closed) return;
@@ -157,6 +187,7 @@ export class LiveEvents {
     this.closed = true;
     clearTimeout(this.retryTimer);
     clearTimeout(this.stopTimer);
+    clearTimeout(this.quietTimer);
     this.source?.close();
     this.source = null;
   }

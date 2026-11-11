@@ -878,6 +878,9 @@ export const handlers = Object.freeze({
       };
     }
     const { revision, warnings, touched } = result;
+    // Read now, before anything is awaited: a parallel call may change the board meanwhile, and
+    // this result describes the revision it names.
+    const board = s.getState();
     // Write the autosave now, so a failure is reported with this update.
     await s.flushAutosave().catch(() => {});
     let layout = warnings.length ? updateWarnings(warnings, [], touched) : "";
@@ -889,7 +892,6 @@ export const handlers = Object.freeze({
         layout = [layout, e?.name === "AbortError" ? "layout check cancelled." : `layout check unavailable: ${String(e.message).split("\n")[0]}`].filter(Boolean).join("\n");
       }
     }
-    const board = s.getState();
     return {
       content: [
         {

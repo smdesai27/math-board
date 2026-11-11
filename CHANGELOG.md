@@ -8,6 +8,17 @@
 - Sliders on plots: `params` (up to six, with `min`, `max`, `value`, `step`, `label`, `period`) add slider rows the learner drags or plays, and every expression, point, line and area end of the plot can use them. A point with `drag: true` moves the slider it is bound to. `board_read` lists sliders, and a copied reference includes the learner's values. The teaching text suggests a slider when the lesson is how something changes with a parameter.
 - html artifacts, off unless `MATH_BOARD_HTML=1`: the model's own HTML and JavaScript in a sandboxed frame (opaque origin, its own policy blocking network requests, WebRTC removed, no navigation), with bundled three.js (and OrbitControls), d3, matter.js, lil-gui, fft.js and KaTeX loaded on request. Frames sit in a layer that follows pan, zoom, steps and fades (Safari can't place a frame inside the SVG), load when their chapter comes near the screen, and report ready or their errors, with the source line, to the layout check. Each new frame is loaded in the headless check first, one at a time (a layout check goes through every frame its update added); one that isn't ready within 8 s (an endless loop) or crashes the page is never sent to the learner's browser, and the tool result and `board_read` say so. Frames may not write the clipboard. `&html=off` in the board's address loads no frame in that tab. `board_docs html` documents it, and `/board status` shows whether it's on.
 
+**Fixes**
+
+- A request the server could not handle (say, a `saves` that is a file) gets an error answer instead of hanging.
+- A board that shared its data folder with a second one writes its `board.lock` again after the second one stops, so a third still gets the warning.
+- Stopping the board during a layout check no longer starts a second headless browser, and a headless page that could not load the board is closed.
+- With two updates in flight, each `board_update` result describes the revision it names.
+- The page notices a connection that died without an error (the server's pings are events now, and 70 s without one reconnects), and a failed read after a change is tried again instead of leaving an older board on screen.
+- Moving or restyling a plot keeps the slider values the learner set; only a change to its sliders resets them.
+- The hover reference is not recomputed on every frame of a pan or zoom; it comes back when the view rests.
+- The browser tests run in WebKit as well as Chromium.
+
 **Tools**
 
 - `board_snapshot` lists the measured boxes of the items in the region it shows (a chapter, a region, the camera view), not every item on the board, and says how many are elsewhere.

@@ -257,7 +257,8 @@ test("hovering an item shows its step, id and chapter; never during a drag", asy
   expect(errors).toEqual([]);
 });
 
-test("clicking an item copies its reference with a toast; double-click still follows", async ({ page, context }) => {
+test("clicking an item copies its reference with a toast; double-click still follows", async ({ page, context, browserName }) => {
+  test.skip(browserName === "webkit", "Playwright's WebKit can't grant clipboard permissions, so the clipboard can't be read back");
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(server.url).origin });

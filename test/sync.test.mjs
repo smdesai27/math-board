@@ -248,3 +248,52 @@ test("a page that cannot connect at all reports the server as stopped", (t) => {
   }
   assert.deepEqual(states, ["reconnecting", "stopped"]);
 });
+
+test("a failed read after a revision event is tried again, so the board does not stay behind", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let fail = true;
+  const { sync, renders } = client(async () => {
+    if (fail) throw new Error("network");
+    return state(2);
+  }, 1);
+  await assert.rejects(sync.remote(2), /network/);
+  assert.deepEqual(renders, []);
+  fail = false;
+  t.mock.timers.tick(1000);
+  await sync.queue;
+  assert.deepEqual(renders.map((r) => r.revision), [2]);
+  // A later failure starts the schedule again from its first wait.
+  assert.equal(sync.retries, 0);
+});
+
+test("reads that keep failing stop after the retry schedule", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { sync, calls } = client(async () => {
+    throw new Error("network");
+  }, 1);
+  await assert.rejects(sync.remote(2), /network/);
+  for (const wait of [1000, 2000, 4000, 8000, 60000]) {
+    t.mock.timers.tick(wait);
+    await sync.queue;
+  }
+  assert.equal(calls.length, 5);
+});
+
+test("a stream that goes quiet is reopened; pings keep it open and are not events", (t) => {
+  const { sources, states, events } = watch(t, { quietAfter: 70000 });
+  sources[0].open();
+  sources[0].send({ type: "hello", revision: 1 });
+  for (let i = 0; i < 4; i++) {
+    t.mock.timers.tick(25000);
+    sources[0].send({ type: "ping" });
+  }
+  assert.equal(sources.length, 1);
+  assert.deepEqual(events, [{ revision: 1, resync: false }]);
+  t.mock.timers.tick(70000); // nothing, not even a ping
+  assert.equal(sources[0].closed, true);
+  assert.deepEqual(states, ["connected", "reconnecting"]);
+  t.mock.timers.tick(500);
+  sources[1].open();
+  sources[1].send({ type: "hello", revision: 1 });
+  assert.deepEqual(events.at(-1), { revision: 1, resync: true });
+});

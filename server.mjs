@@ -1528,17 +1528,20 @@ export class BoardServer {
     return path.join(this.dataDir, "board.lock");
   }
 
-  /** Note another live board server on this data folder (it stays allowed; see notices()). */
+  /**
+   * Note another live board server on this data folder (it stays allowed; see notices()). A lock
+   * that is gone or whose owner is gone (a later board on this folder wrote its own and removed it
+   * when it stopped) is written again, so the next board still finds this one.
+   */
   checkLock() {
-    let lock;
+    let lock = null;
     try {
       lock = JSON.parse(readFileSync(this.lockFile, "utf8"));
-    } catch {
-      return;
-    }
-    if (!lock || lock.instance === this.instance) return;
-    const alive = lock.pid === process.pid ? LIVE.has(lock.instance) : pidAlive(lock.pid);
+    } catch {}
+    if (lock?.instance === this.instance) return;
+    const alive = lock && (lock.pid === process.pid ? LIVE.has(lock.instance) : pidAlive(lock.pid));
     if (alive) this.sharedWith = { pid: lock.pid, port: lock.port, started: lock.started, instance: lock.instance };
+    else if (this.server) this.writeLock();
   }
 
   writeLock() {
@@ -1601,7 +1604,7 @@ export class BoardServer {
     LIVE.add(this.instance);
     SESSIONS.set(this.dataDir, { token: this.token, port: this.port, owner: this.instance });
     await mkdir(this.dataDir, { recursive: true, mode: 0o700 }).catch(() => {});
-    this.checkLock();
+    this.checkLock(); // notes a live owner; a missing or dead one's lock becomes ours
     this.writeLock();
     await this.restoreAutosave();
     return this;
@@ -1713,6 +1716,7 @@ export class BoardServer {
       "Content-Security-Policy",
       `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; frame-src ${this.html ? "'self'" : "'none'"}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`,
     );
+    const snapshot = req.headers[SNAPSHOT_HEADER] === "1";
     try {
       // Every route: exact loopback Host (DNS rebinding) and, when sent, the board's own Origin.
       if (req.headers.host !== `127.0.0.1:${this.port}`) return this.json(res, 403, { ok: false, error: "forbidden host" });
@@ -1723,7 +1727,6 @@ export class BoardServer {
       } catch {
         return this.json(res, 400, { ok: false, error: "malformed URL" });
       }
-      const snapshot = req.headers[SNAPSHOT_HEADER] === "1";
       // html artifact frames have an opaque origin ("null"); they may load only the libraries and fonts.
       const library = req.method === "GET" && /^\/(vendor|assets)\//.test(pathname);
       if (req.headers.origin !== undefined && !this.allowedOrigin(req.headers.origin) && !(library && req.headers.origin === "null"))
@@ -1742,15 +1745,15 @@ export class BoardServer {
       if (pathname === "/api/events" && req.method === "GET") {
         // EventSource cannot set an Authorization header; this route takes the token as a query parameter.
         if (url.searchParams.get("token") !== this.token) return this.json(res, 401, { ok: false, error: "missing or invalid token" });
-        if (this.clients.size >= 32) return this.json(res, 429, { ok: false, error: "too many browser connections" });
+        if (!snapshot && this.viewerCount() >= 32) return this.json(res, 429, { ok: false, error: "too many browser connections" });
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
         res.write(`data: ${JSON.stringify({ type: "hello", revision: this.revision })}\n\n`);
         // The headless snapshot page marks its requests, so it is not counted as a viewer.
-        res.snapshot = req.headers[SNAPSHOT_HEADER] === "1";
+        res.snapshot = snapshot;
         this.clients.add(res);
         const ping = setInterval(() => {
           try {
-            res.write(": ping\n\n");
+            res.write('data: {"type":"ping"}\n\n'); // an event, not a comment: the page watches for it
           } catch {}
         }, 25000);
         ping.unref?.();
@@ -1824,9 +1827,12 @@ export class BoardServer {
       return this.notFound(res);
     } catch (err) {
       if (!res.headersSent) {
+        // Nothing above expected this error (the routes answer their own): say so, never hang.
         try {
-          this.json(res, err.conflict ? 409 : 400, { ok: false, error: String(err?.message ?? err), revision: this.revision, board: this.board, ...this.frames(snapshot) });
-        } catch {}
+          this.json(res, err?.conflict ? 409 : 500, { ok: false, error: String(err?.message ?? err), revision: this.revision });
+        } catch {
+          res.destroy();
+        }
       } else {
         try {
           res.end();

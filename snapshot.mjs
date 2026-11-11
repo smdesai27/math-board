@@ -141,6 +141,8 @@ export class Snapshotter {
   }
 
   async ensurePage() {
+    // A call still running when the server stops must not start a browser for a board that is gone.
+    if (!this.server.url) throw new Error("the board server is stopped");
     this.touch();
     if (this.live) {
       if (this.pageStamp === assetStamp()) return this.page;
@@ -176,12 +178,17 @@ export class Snapshotter {
         page.on?.("close", () => {
           if (this.page === page) this.page = null;
         });
-        // Marks this page's requests (its SSE connection too), so it never counts as a viewer.
-        await page.setExtraHTTPHeaders?.({ [SNAPSHOT_HEADER]: "1" });
-        // nofollow: snapshots choose their own region instead of following the lesson camera.
-        await page.goto(`${this.server.url}&nofollow=1`, { waitUntil: "domcontentloaded" });
-        // Snapshots show the board only, without the hover chrome.
-        await page.addStyleTag({ content: HIDE_CHROME });
+        try {
+          // Marks this page's requests (its SSE connection too), so it never counts as a viewer.
+          await page.setExtraHTTPHeaders?.({ [SNAPSHOT_HEADER]: "1" });
+          // nofollow: snapshots choose their own region instead of following the lesson camera.
+          await page.goto(`${this.server.url}&nofollow=1`, { waitUntil: "domcontentloaded" });
+          // Snapshots show the board only, without the hover chrome.
+          await page.addStyleTag({ content: HIDE_CHROME });
+        } catch (err) {
+          await page.close?.().catch?.(() => {});
+          throw err;
+        }
         if (generation !== this.generation) {
           await page.close().catch(() => {});
           throw new Error("the board server stopped while the headless browser was starting");

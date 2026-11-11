@@ -195,6 +195,15 @@ test("a second board on the same data folder is named in notices; the lock goes 
   assert.match(a.notices().join("\n"), new RegExp(`port ${b.port}`));
   await b.stop();
   assert.deepEqual(a.notices(), [], "the warning ends with the other board");
+  // The newcomer took the lock and removed it when it stopped: the first board writes its own
+  // again at its next autosave, so a third board still finds it.
+  a.update({ title: "b" });
+  await a.flushAutosave();
+  assert.equal((await read(path.join(dir, "board.lock"))).instance, a.instance);
+  const c = new BoardServer({ dataDir: dir });
+  await c.start();
+  assert.match(c.notices().join("\n"), new RegExp(`port ${a.port}`));
+  await c.stop();
   await a.stop();
   await assert.rejects(readFile(path.join(dir, "board.lock")), /ENOENT/);
 });

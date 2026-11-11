@@ -68,7 +68,7 @@ function setView(v) {
   svg?.setAttribute("viewBox", v.join(" "));
   updateViewScale(svg);
   syncFrames();
-  scheduleRef();
+  refViewMoved();
 }
 /** Board units per screen pixel as a CSS variable, for text that keeps a minimum on-screen size. */
 function updateViewScale(svg = $("blackboard")) {
@@ -963,8 +963,8 @@ function Artifact({ item, sig }) {
     if (item.type === "mermaid") track(mermaid.render(`diagram-${item.id.replace(/[^a-zA-Z0-9_-]/g, "")}`, item.source).then(({ svg }) => { const t = tuneMermaid(svg); return decodeThen(svgUrl(t.svg), live, (url) => ok(url, t.size)); }).catch((e) => fail(`Mermaid: ${e?.message || e}`)));
     return () => { alive = false; };
   }, [item.id, item.type, item.source, item.smiles, item.icon, item.width, item.height]);
-  // A changed plot starts again from its sliders' values.
-  if (item.type === "plot") return <Plot key={sig} item={item} />;
+  // A plot whose sliders changed starts again from their values; moving or restyling it keeps the learner's.
+  if (item.type === "plot") return <Plot key={JSON.stringify(item.params ?? [])} item={item} />;
   if (item.type === "html") return <HtmlSlot item={item} />;
   if (error) return <g data-render-error={error}>
     <rect x={item.x} y={item.y} width={item.width} height={Math.min(item.height, 70)} fill="#ef6f6c22" stroke="#ef6f6c" strokeDasharray="6 4" />
@@ -1315,6 +1315,15 @@ function scheduleRef() {
   if (!REFS || refFrame || (!refPoint && !refShown)) return;
   refFrame = requestAnimationFrame(() => { refFrame = 0; showRef(refPoint && !refDrag ? pickItem(refPoint.x, refPoint.y) : null); });
 }
+// While the view moves (a pan, a zoom, a camera glide) nothing is picked: finding the item under
+// the pointer measures every item, which is too much for every frame of a long lesson.
+let refSettle = 0;
+function refViewMoved() {
+  if (!REFS || (!refPoint && !refShown)) return;
+  if (refShown) showRef(null);
+  clearTimeout(refSettle);
+  refSettle = setTimeout(scheduleRef, 120);
+}
 function refHover(x, y) { if (REFS) { refPoint = { x, y }; scheduleRef(); } }
 function refLeave() { refPoint = null; scheduleRef(); }
 function refDragging(on) { refDrag = on; if (on) showRef(null); else scheduleRef(); }
@@ -1486,6 +1495,7 @@ function connect() {
   live = new LiveEvents({
     open: () => new EventSource(`/api/events?token=${encodeURIComponent(sessionToken)}`),
     onState: onConnection,
+    quietAfter: 70000, // the server pings every 25 s
     // The first event after an outage may come from a restarted server: show its board as it is.
     onEvent: (d, { resync }) => {
       // The server finished checking new html artifacts: fetch which frames may load now.
