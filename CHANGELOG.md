@@ -16,6 +16,13 @@
 - New board (the page's ⋯ menu, or `/board new`): saves the lesson under its title and today's date, then starts an empty board. The teaching text tells the tutor that the learner decides when a new board starts.
 - `/board status` says when another session hosts the board; `/board stop` then leaves it running.
 
+**Teaching**
+
+- `focus: [ids]` in `board_update` points at items: a ring around each and the rest of the board dimmed, until the next update. Nothing is drawn.
+- `below` and `rightOf` place an equation, text, rect, ellipse or artifact next to another item, from the box the layout check measured for it, and store plain `x,y`. An arrow takes `from` and `to` item ids.
+- `cover: true` hides an item behind a panel until the learner clicks it.
+- `board_read` ends with what the learner's tab shows: the chapter in view, whether they stepped back, slider values, the item last clicked and the covers lifted. The tab reports it; it never changes the board or starts a model turn.
+
 **Fixes**
 
 - A request the server could not handle (say, a `saves` that is a file) gets an error answer instead of hanging.

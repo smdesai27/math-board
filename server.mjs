@@ -362,9 +362,11 @@ function reader(raw, where, strict) {
   };
 }
 
-const ANIMATION_KEYS = ["step", "reveal", "duration", "order"];
-/** Animation fields shared by every item kind (see browser playback). */
+const ANIMATION_KEYS = ["step", "reveal", "duration", "order", "cover"];
+/** Animation fields shared by every item kind (see browser playback), and `cover`. */
 function readAnimation(r, out) {
+  // cover: hidden behind a panel in the learner's tab until they click it (predict, then look).
+  if (r.bool("cover") === true) out.cover = true;
   const step = r.int("step", 0, 1e6);
   if (step !== undefined) out.step = step;
   const reveal = r.oneOf("reveal", REVEALS);
@@ -784,7 +786,39 @@ export function sanitizeShape(shape, opts = {}) {
 /* applyUpdate                                                         */
 /* ------------------------------------------------------------------ */
 
-const UPDATE_KEYS = keys("title", "clear", "chapters", "equations", "scene", "items", "camera");
+const UPDATE_KEYS = keys("title", "clear", "chapters", "equations", "scene", "items", "camera", "focus");
+
+/* ---- placing an item next to another one: below, rightOf, and arrows from one item to another ---- */
+
+/**
+ * Where an item is on the board when the layout check has not measured it (yet): from its stored
+ * fields, in board coordinates. Exact for artifacts, rects, ellipses and point shapes; a guess
+ * for text and equations, whose size only the browser knows.
+ */
+export function estimateBox(it, kind, origin = { x: 0, y: 0 }) {
+  let box;
+  if (kind === "artifact") box = { x: it.x, y: it.y, w: it.width, h: it.height };
+  else if (kind === "equation") {
+    const size = it.size ?? 1;
+    box = { x: it.x ?? EQUATION_LAYOUT.x, y: it.y ?? EQUATION_LAYOUT.y, w: Math.min(900, Math.max(60, String(it.latex).replace(/\\[a-zA-Z]+|[{}_^]/g, "").length * 15 * size)), h: 56 * size };
+  } else if (Array.isArray(it.points)) {
+    const xs = it.points.map((p) => p[0]), ys = it.points.map((p) => p[1]);
+    box = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+  } else if (it.type === "text") {
+    const lines = String(it.text).split("\n"), size = it.size ?? 24;
+    const w = Math.max(...lines.map((l) => l.length)) * size * 0.5;
+    box = { x: it.x - (it.anchor === "middle" ? w / 2 : it.anchor === "end" ? w : 0), y: it.y - size * 0.8, w, h: lines.length * size * 1.25 };
+  } else box = { x: it.x, y: it.y, w: it.w, h: it.h };
+  return { x: (box.x || 0) + origin.x, y: (box.y || 0) + origin.y, w: Math.max(0, box.w || 0), h: Math.max(0, box.h || 0) };
+}
+
+/** The point where the line from a box's centre toward `to` leaves the box (grown by `pad`). */
+function edgePoint(box, to, pad) {
+  const cx = box.x + box.w / 2, cy = box.y + box.h / 2, dx = to.x - cx, dy = to.y - cy;
+  if (!dx && !dy) return { x: cx, y: cy };
+  const k = Math.min(dx ? (box.w / 2 + pad) / Math.abs(dx) : Infinity, dy ? (box.h / 2 + pad) / Math.abs(dy) : Infinity, 1);
+  return { x: cx + dx * k, y: cy + dy * k };
+}
 const SCENE_KEYS = keys("mode", "shapes", "artifacts");
 const sceneItems = (board) => [...board.scene.shapes, ...board.scene.artifacts, ...board.equations];
 
@@ -833,7 +867,7 @@ export function legacyEquationPositions(equations) {
  * Returns { board, warnings, touched }: warnings found without a browser (overlapping chapters)
  * and the ids of the items and chapters the update added or changed.
  */
-export function applyUpdateReport(state, update, { strict = true, html = false } = {}) {
+export function applyUpdateReport(state, update, { strict = true, html = false, boxes = null } = {}) {
   if (!update || typeof update !== "object" || Array.isArray(update)) fail("update must be an object");
   for (const key of Object.keys(update)) if (!UPDATE_KEYS.has(key)) fail(`unknown update field: ${key}`);
   if (update.equations !== undefined && !Array.isArray(update.equations)) fail("equations must be an array");
@@ -884,6 +918,54 @@ export function applyUpdateReport(state, update, { strict = true, html = false }
       }
     }
   };
+  // Items placed relative to another one (below, rightOf; an arrow's from and to) get plain x,y
+  // or points here, before validation, and those are what is stored: nothing moves later. The
+  // other item's box is the one the layout check measured (`boxes`, board coordinates), else an
+  // estimate; an item added earlier in this same update can only be estimated.
+  const pending = new Map(); // id -> { it, kind } added by this update so far
+  const originOf = (chapter) => {
+    const c = next.chapters.find((ch) => ch.id === chapter);
+    return c ? { x: c.x, y: c.y } : { x: 0, y: 0 };
+  };
+  const boxOf = (id, where, field) => {
+    if (!VALID_ID(id)) fail(`${where}: ${field} must be the id of an item`);
+    const fresh = pending.get(id);
+    const eq = !fresh && next.equations.find((e) => e.id === id);
+    const shape = !fresh && !eq && next.scene.shapes.find((s) => s.id === id);
+    const artifact = !fresh && !eq && !shape && next.scene.artifacts.find((a) => a.id === id);
+    const found = fresh ?? (eq ? { it: eq, kind: "equation" } : shape ? { it: shape, kind: "shape" } : artifact ? { it: artifact, kind: "artifact" } : null);
+    if (!found) fail(`${where}: ${field}: no item "${id}" on the board or earlier in this update`);
+    return { ...((!fresh && boxes?.get(id)) || estimateBox(found.it, found.kind, originOf(found.it.chapter))), chapter: found.it.chapter };
+  };
+  const place = (raw, kind, where) => {
+    if (!strict || !raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+    const { below, rightOf, gap, from, to, ...rest } = raw;
+    const relative = below !== undefined || rightOf !== undefined, linked = from !== undefined || to !== undefined;
+    if (!relative && !linked) {
+      if (gap !== undefined) fail(`${where}: gap goes with below, rightOf or an arrow's from and to`);
+      return raw;
+    }
+    if (gap !== undefined && !(typeof gap === "number" && Number.isFinite(gap) && gap >= 0)) fail(`${where}: gap must be a number of at least 0, got ${show(gap)}`);
+    const local = (p, o) => [Math.round(p.x - o.x), Math.round(p.y - o.y)];
+    if (linked) {
+      if (kind !== "shape" || raw.type !== "arrow") fail(`${where}: from and to are for arrows`);
+      if (relative || raw.points !== undefined) fail(`${where}: an arrow takes points, or from and to, not both`);
+      if (from === undefined || to === undefined) fail(`${where}: an arrow between items needs both from and to`);
+      const a = boxOf(from, where, "from"), b = boxOf(to, where, "to");
+      const chapter = rest.chapter ?? a.chapter, o = originOf(chapter), pad = Math.min(gap ?? 8, 200);
+      const centre = (box) => ({ x: box.x + box.w / 2, y: box.y + box.h / 2 });
+      return { ...rest, ...(chapter && { chapter }), points: [local(edgePoint(a, centre(b), pad), o), local(edgePoint(b, centre(a), pad), o)] };
+    }
+    if (below !== undefined && rightOf !== undefined) fail(`${where}: give below or rightOf, not both`);
+    if (kind === "shape" && !["text", "rect", "ellipse"].includes(raw.type)) fail(`${where}: below and rightOf place text, rects, ellipses, equations and artifacts; a ${show(raw.type)} takes points`);
+    const t = boxOf(below ?? rightOf, where, below !== undefined ? "below" : "rightOf");
+    const chapter = rest.chapter ?? t.chapter, o = originOf(chapter), g = Math.min(gap ?? 24, 1000);
+    const [x, top] = local(below !== undefined ? { x: t.x, y: t.y + t.h + g } : { x: t.x + t.w + g, y: t.y }, o);
+    // A text's y is its baseline, about 0.8 of its size below its top.
+    const y = kind === "shape" && raw.type === "text" ? Math.round(top + 0.8 * (typeof rest.size === "number" && rest.size > 0 ? clamp(rest.size, 8, 200) : 24)) : top;
+    return { ...rest, ...(chapter && { chapter }), x: rest.x ?? x, y: rest.y ?? y };
+  };
+
   const named = (raw) => (strict && raw && typeof raw === "object" && !Array.isArray(raw) && raw.id === undefined && /^[a-z]{1,12}$/.test(raw.type ?? "") ? { ...raw, id: shortId(raw.type) } : raw);
 
   if (Array.isArray(update.equations)) {
@@ -893,7 +975,8 @@ export function applyUpdateReport(state, update, { strict = true, html = false }
       const { op: kind, ...fields } = op;
       if (kind === "add" && strict && fields.id === undefined) fields.id = shortId("eq");
       if (kind === "add") {
-        const eq = equationOf(fields, { strict, where });
+        const eq = equationOf(place(fields, "equation", where), { strict, where });
+        pending.set(eq.id, { it: eq, kind: "equation" });
         if (next.equations.length >= MAX_EQUATIONS) fail(`too many equations (max ${MAX_EQUATIONS})`);
         if (next.equations.some((e) => e.id === eq.id)) fail(`${where}: duplicate equation id "${eq.id}"`);
         placeEquation(next, eq);
@@ -925,8 +1008,13 @@ export function applyUpdateReport(state, update, { strict = true, html = false }
     if (!Array.isArray(rawShapes) || !Array.isArray(rawArtifacts)) fail("scene.shapes and scene.artifacts must be arrays");
     if (strict && rawShapes.length > MAX_SHAPES_PER_UPDATE) fail(`too many shapes in one update (max ${MAX_SHAPES_PER_UPDATE})`);
     if (strict && rawArtifacts.length > MAX_ARTIFACTS_PER_UPDATE) fail(`too many artifacts in one update (max ${MAX_ARTIFACTS_PER_UPDATE})`);
-    const shapes = rawShapes.map((s, i) => shapeOf(named(s), { strict, where: `scene.shapes[${i}]${s?.id ? ` "${String(s.id).slice(0, 64)}"` : ""}` }));
-    const artifacts = rawArtifacts.map((a, i) => sanitizeArtifact(named(a), { strict, html, where: `scene.artifacts[${i}]${a?.id ? ` "${String(a.id).slice(0, 64)}"` : ""}` }));
+    const added = (raw, kind, where, make) => {
+      const it = make(place(named(raw), kind, where), where);
+      pending.set(it.id, { it, kind });
+      return it;
+    };
+    const shapes = rawShapes.map((s, i) => added(s, "shape", `scene.shapes[${i}]${s?.id ? ` "${String(s.id).slice(0, 64)}"` : ""}`, (raw, where) => shapeOf(raw, { strict, where })));
+    const artifacts = rawArtifacts.map((a, i) => added(a, "artifact", `scene.artifacts[${i}]${a?.id ? ` "${String(a.id).slice(0, 64)}"` : ""}`, (raw, where) => sanitizeArtifact(raw, { strict, html, where })));
     for (const it of [...shapes, ...artifacts]) touched.add(it.id);
     if (mode === "replace") next.scene = { shapes, artifacts };
     else next.scene = { shapes: [...next.scene.shapes, ...shapes], artifacts: [...next.scene.artifacts, ...artifacts] };
@@ -963,6 +1051,16 @@ export function applyUpdateReport(state, update, { strict = true, html = false }
   for (const it of allItems)
     if (it.chapter !== undefined && !known.has(it.chapter)) fail(`item ${it.id}: unknown chapter "${it.chapter}" (add it with chapters:[{op:"add",id,...}] first)`);
   if (next.camera?.chapter && !known.has(next.camera.chapter)) next.camera = null;
+
+  // focus: the items the tutor points at. It belongs to the update that set it; the next update
+  // (which says what the tutor does next) ends it.
+  delete next.focus;
+  if (update.focus !== undefined && update.focus !== null) {
+    if (!Array.isArray(update.focus) || update.focus.length > 8 || !update.focus.every(VALID_ID)) fail("focus must be a list of at most 8 item ids");
+    const ids = new Set(allItems.map((it) => it.id));
+    for (const id of update.focus) if (!ids.has(id)) fail(`focus: no item "${id}" on the board`);
+    if (update.focus.length) next.focus = [...new Set(update.focus)];
+  }
 
   // Chapters this update added or moved that overlap another chapter.
   const changed = next.chapters.filter((c) => chaptersBefore.get(c.id) !== JSON.stringify(c));
@@ -1288,6 +1386,8 @@ export class BoardServer {
   constructor({ dataDir, title, autosave = true, kind = "pi", html = htmlEnabled(), exclusive = false } = {}) {
     this.dataDir = path.resolve(dataDir ?? defaultDataDir(kind));
     this.exclusive = exclusive;
+    this.boxes = new Map(); // id -> { x, y, w, h }: where the layout check last measured each item (board coordinates)
+    this.learner = null; // what the learner's tab last reported about its view (see noteView)
     this.tools = null; // (name, params, { signal, openHint }) => result: runs a model tool here for a session that joined
     this.html = html; // html artifacts allowed (MATH_BOARD_HTML=1)
     // Headless check of each html artifact's frame (by MAC): { state: "ok" | "failed" | "unchecked", reason? }.
@@ -1345,12 +1445,64 @@ export class BoardServer {
   apply({ baseRevision, ...update }, { strict = true } = {}) {
     if (this.stopping || this.stopped) fail("this board server was stopped; call board_open to start the board again");
     if (baseRevision !== undefined) this.checkRevision(baseRevision);
-    const { board, warnings, touched } = applyUpdateReport(this.board, update, { strict, html: this.html });
+    const { board, warnings, touched } = applyUpdateReport(this.board, update, { strict, html: this.html, boxes: this.boxes });
     this.board = board;
     this.revision += 1;
+    for (const id of touched) this.boxes.delete(id); // changed since it was measured
     this.broadcast({ type: "revision", revision: this.revision });
     this.scheduleAutosave();
     return { revision: this.revision, warnings, touched };
+  }
+
+  /** Boxes a layout check measured at `revision`; kept only if the board has not changed since. */
+  noteBoxes(items, revision) {
+    if (revision !== this.revision || !Array.isArray(items)) return;
+    this.boxes = new Map(items.map((i) => [i.id, { x: i.x, y: i.y, w: i.w, h: i.h }]));
+  }
+
+  /**
+   * What the learner's tab says about its own view: the step it shows, the chapter in view,
+   * slider values, the item last clicked, the covers lifted. Never a change to the board and
+   * never a model turn: the tutor sees it in its next board_read. Only ids that exist, numbers
+   * and slider read-outs are kept (no free text).
+   */
+  noteView(raw) {
+    if (!raw || typeof raw !== "object") return;
+    const items = new Map(sceneItems(this.board).map((it) => [it.id, it]));
+    const int = (v) => (Number.isInteger(v) && v >= 0 && v <= 1e6 ? v : 0);
+    const sliders = {};
+    for (const [id, text] of Object.entries(raw.sliders && typeof raw.sliders === "object" ? raw.sliders : {}).slice(0, 20))
+      if (items.get(id)?.type === "plot" && typeof text === "string" && text.length <= 200 && /^[\p{L}\p{N}_ =.,+\u2212-]*$/u.test(text)) sliders[id] = text;
+    this.learner = {
+      at: Date.now(),
+      step: int(raw.step),
+      steps: int(raw.steps),
+      live: raw.live !== false,
+      chapter: (this.board.chapters ?? []).some((c) => c.id === raw.chapter) ? raw.chapter : null,
+      sliders,
+      clicked: items.has(raw.clicked) ? raw.clicked : null,
+      uncovered: (Array.isArray(raw.uncovered) ? raw.uncovered : []).filter((id) => items.get(id)?.cover).slice(0, 100),
+    };
+  }
+
+  /** One line for board_read about the learner's view, or "" when no tab is open or none has reported. */
+  learnerLine() {
+    const v = this.learner;
+    if (!v || this.viewerCount() === 0) return "";
+    const items = new Map(sceneItems(this.board).map((it) => [it.id, it]));
+    const age = Math.round((Date.now() - v.at) / 1000);
+    const parts = [];
+    if (v.chapter && (this.board.chapters ?? []).some((c) => c.id === v.chapter)) parts.push(`looking at chapter ${v.chapter}`);
+    if (v.steps) parts.push(v.live || v.step >= v.steps ? `on the latest step (${v.steps})` : `stepped back to step ${v.step} of ${v.steps}`);
+    const sliders = Object.entries(v.sliders).filter(([id]) => items.has(id));
+    if (sliders.length) parts.push(`sliders ${sliders.map(([id, text]) => `${id}: ${text}`).join("; ")}`);
+    if (v.clicked && items.has(v.clicked)) parts.push(`last clicked ${v.clicked}`);
+    const covers = [...items.values()].filter((it) => it.cover).map((it) => it.id);
+    if (covers.length) {
+      const lifted = covers.filter((id) => v.uncovered.includes(id));
+      parts.push(lifted.length ? `uncovered ${lifted.join(", ")}${lifted.length < covers.length ? `; still covered ${covers.filter((id) => !lifted.includes(id)).join(", ")}` : ""}` : `has not uncovered ${covers.join(", ")}`);
+    }
+    return parts.length ? `learner's tab (${age < 90 ? `${age} s` : `${Math.round(age / 60)} min`} ago): ${parts.join(" · ")}` : "";
   }
 
   /** Throw a conflict error (err.conflict = { currentRevision }) unless baseRevision is the current revision. */
@@ -1923,6 +2075,11 @@ export class BoardServer {
         if (body === null) return; // already answered (413/400)
         // Sessions that joined this board (attach.mjs): their model's tool calls run here, and
         // their /board export asks for the images. A request the caller gave up on is cancelled.
+        // The learner's tab reports its view (never the headless page): see noteView.
+        if (pathname === "/api/view") {
+          if (!snapshot) this.noteView(body);
+          return this.json(res, 200, { ok: true });
+        }
         if (pathname === "/api/tool" || pathname === "/api/snapshot") {
           const gone = new AbortController();
           res.on("close", () => { if (!res.writableEnded) gone.abort(); });

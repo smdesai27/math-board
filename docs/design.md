@@ -14,7 +14,13 @@ What I can do on the page: pan, zoom, step back and forward, replay a chapter, s
 
 I decide when a new board starts, not the tutor. New board (or `/board new`) saves the lesson under its title and today's date and gives me an empty board; until I press it, the tutor keeps adding chapters to the one that's up, and it's told to ask before drawing on a lesson it doesn't recognise.
 
-Sliders on a plot are the one control that changes what an item shows. They still don't write: the values live in my tab, so the tutor, the snapshots and other tabs see each slider where the tutor set it, and a click on the plot copies a reference with my values, so I can say "with w = 4.5" in the terminal. The expressions they feed are the same JSON the server checked; moving a slider runs no new code.
+Sliders on a plot are the one control that changes what an item shows. They still don't write: the board, the snapshots and other tabs keep each slider where the tutor set it, and a click on the plot copies a reference with my values, so I can say "with w = 4.5" in the terminal. The expressions they feed are the same JSON the server checked; moving a slider runs no new code.
+
+The tutor can see my view, though, when it looks. At first nothing about my tab left it, and the tutor taught blind: it couldn't tell that I had stepped back three steps, or where I'd left a slider, unless I typed it. Now the tab tells the server what it shows (the step, the chapter in view, slider read-outs, the item I last clicked, the covers I lifted), and `board_read` passes that on as one line. Two rules keep it from becoming a second input channel: it never starts a model turn (the tutor reads it when it next reads the board), and it carries no free text, only ids that exist, numbers and slider read-outs.
+
+Covers use the same line. An item with `cover: true` stays behind a panel until I click it, so the tutor can draw a question, put the answer up covered and ask me to predict. Whether I looked is my tab's state, and the tutor can see it.
+
+Pointing is the other half. A teacher at a board mostly points, and drawing is the expensive way to do it. `focus` rings the items the tutor is talking about and dims the rest until its next update, with nothing added to the board.
 
 Because the page never talks to the model, the tutor can't tell on its own whether I'm watching. The server can, so read, update and load results end with "No browser is showing the board" when nobody is, and the tutor knows to call `board_open` instead of drawing for an empty room. The headless page behind the layout checks doesn't count as a viewer.
 
@@ -54,7 +60,7 @@ Why: asking a model to look at a screenshot and say what's wrong is slow, spends
 
 ## Small at rest
 
-Not every pi session is a lesson, so an unused board shouldn't tax every turn. In pi only `board_open` is active until the board is opened: 255 characters per turn instead of 12,204 for all seven tools. The long reference (artifact formats, SVG rules, plot grammar, animation, layout) lives in `board_docs`, which the tutor fetches by topic before it uses a format for the first time. The `board_teaching` section is constant text, so the prompt cache holds.
+Not every pi session is a lesson, so an unused board shouldn't tax every turn. In pi only `board_open` is active until the board is opened: 255 characters per turn instead of 12,977 for all seven tools. The long reference (artifact formats, SVG rules, plot grammar, animation, layout) lives in `board_docs`, which the tutor fetches by topic before it uses a format for the first time. The `board_teaching` section is constant text, so the prompt cache holds.
 
 ## Strict input, honest reports
 
@@ -94,7 +100,7 @@ A frame can't hurt the board page, but it can block it: sandboxed frames from th
 Not done yet, roughly in the order I want them:
 
 - **Equation morphs.** A derivation step that transforms the line above in place (terms moving, cancelling, regrouping) instead of always writing a new line. The idea is Manim's `TransformMatchingTex`.
-- **Layout maps.** Named anchors or a free-space map for each chapter, so the tutor places items by region instead of raw coordinates and the warnings can say where there is room. Code2Video found a coarse grid beat free placement.
+- **Layout maps.** `below` and `rightOf` now place an item from another one's measured box, and arrows run between items, which covers most "next line" and "label this" placements. Still open: a free-space map for each chapter, so the warnings can say where there is room. Code2Video found a coarse grid beat free placement.
 - **Vectors.** A first-class vector item in plot coordinates, for forces, fields and magnetization, so an arrow sits on the axes it belongs to instead of being placed by hand next to them.
 - **Quiz mirroring.** The questions Eero's quiz extension asks in the terminal, shown on the board next to the drawing they're about, without changing his extension.
 

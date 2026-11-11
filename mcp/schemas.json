@@ -83,6 +83,18 @@
                 "y": {
                   "type": "number"
                 },
+                "below": {
+                  "type": "string"
+                },
+                "rightOf": {
+                  "type": "string"
+                },
+                "gap": {
+                  "type": "number"
+                },
+                "cover": {
+                  "type": "boolean"
+                },
                 "color": {
                   "type": "string"
                 },
@@ -405,6 +417,14 @@
           ]
         }
       },
+      "focus": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 8,
+        "description": "Item ids to point at"
+      },
       "check": {
         "type": "boolean"
       },
@@ -488,6 +508,9 @@
                     "order": {
                       "type": "number"
                     },
+                    "cover": {
+                      "type": "boolean"
+                    },
                     "dash": {
                       "type": "string"
                     },
@@ -516,8 +539,6 @@
                   "type": "object",
                   "required": [
                     "type",
-                    "x",
-                    "y",
                     "w",
                     "h"
                   ],
@@ -572,8 +593,20 @@
                     "order": {
                       "type": "number"
                     },
+                    "cover": {
+                      "type": "boolean"
+                    },
                     "dash": {
                       "type": "string"
+                    },
+                    "below": {
+                      "type": "string"
+                    },
+                    "rightOf": {
+                      "type": "string"
+                    },
+                    "gap": {
+                      "type": "number"
                     },
                     "x": {
                       "type": "number"
@@ -600,8 +633,6 @@
                   "type": "object",
                   "required": [
                     "type",
-                    "x",
-                    "y",
                     "w",
                     "h"
                   ],
@@ -656,8 +687,20 @@
                     "order": {
                       "type": "number"
                     },
+                    "cover": {
+                      "type": "boolean"
+                    },
                     "dash": {
                       "type": "string"
+                    },
+                    "below": {
+                      "type": "string"
+                    },
+                    "rightOf": {
+                      "type": "string"
+                    },
+                    "gap": {
+                      "type": "number"
                     },
                     "x": {
                       "type": "number"
@@ -737,6 +780,9 @@
                     "order": {
                       "type": "number"
                     },
+                    "cover": {
+                      "type": "boolean"
+                    },
                     "dash": {
                       "type": "string"
                     },
@@ -764,8 +810,7 @@
                 {
                   "type": "object",
                   "required": [
-                    "type",
-                    "points"
+                    "type"
                   ],
                   "properties": {
                     "type": {
@@ -818,6 +863,9 @@
                     "order": {
                       "type": "number"
                     },
+                    "cover": {
+                      "type": "boolean"
+                    },
                     "dash": {
                       "type": "string"
                     },
@@ -835,6 +883,16 @@
                       "maxItems": 4,
                       "description": "Last segment gets the head"
                     },
+                    "from": {
+                      "type": "string",
+                      "description": "from, to: item ids instead of points"
+                    },
+                    "to": {
+                      "type": "string"
+                    },
+                    "gap": {
+                      "type": "number"
+                    },
                     "color": {
                       "type": "string"
                     },
@@ -848,9 +906,7 @@
                   "type": "object",
                   "required": [
                     "type",
-                    "text",
-                    "x",
-                    "y"
+                    "text"
                   ],
                   "properties": {
                     "type": {
@@ -903,8 +959,20 @@
                     "order": {
                       "type": "number"
                     },
+                    "cover": {
+                      "type": "boolean"
+                    },
                     "text": {
                       "type": "string"
+                    },
+                    "below": {
+                      "type": "string"
+                    },
+                    "rightOf": {
+                      "type": "string"
+                    },
+                    "gap": {
+                      "type": "number"
                     },
                     "x": {
                       "type": "number"

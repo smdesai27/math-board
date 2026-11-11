@@ -37,7 +37,8 @@ assert.deepEqual(await completions("ex"), ["export"]);
 assert.ok(![...ext.tools.keys()].some((name) => /export/.test(name)));
 const def = (name) => ext.tools.get(name).definition;
 // Per-turn cost budgets in characters (description + JSON schema); README quotes the measured numbers.
-const BUDGET = { board_open: 1000, board_update: 9600, total: 12800 };
+// board_update grew by about 800 characters for focus, cover, below/rightOf and arrows between items.
+const BUDGET = { board_open: 1000, board_update: 10200, total: 13200 };
 // index.ts stamps its imports with the same file list the server watches.
 const serverModule = await import(pathToFileURL(path.join(root, "server.mjs")).href);
 const indexFiles = JSON.parse(readFileSync(path.join(root, "index.ts"), "utf8").match(/const SERVER_FILES = (\[[^\]]*\])/)[1]);

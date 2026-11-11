@@ -61,7 +61,9 @@ export const BOARD_TEACHING = [
   "Rhythm: read the board (board_read), draw one step (board_update), ask one check question in the terminal " +
     "and wait for the answer, then continue.",
   "",
-  "To show how something changes with a parameter, give the plot a slider (params) and ask the learner to move it.",
+  "To show how something changes with a parameter, give the plot a slider (params) and ask the learner to move it. " +
+    "Point at what is drawn with focus instead of redrawing it. " +
+    "For a prediction, add the answer with cover:true and ask before they uncover it.",
   "",
   "Keep one concept per chapter: start a new chapter for a new concept and use the camera to move the learner there. " +
     "Keep board text short (labels, key equations, a few words) and put the explanation in the terminal.",
@@ -137,6 +139,10 @@ export const BOARD_DOCS = Object.freeze({
       "Ids are unique across shapes, artifacts and equations. Short ids make later edits and the learner's references (\"step 4, eq2\") easy.",
     "Order inside one update: title, clear ([\"equations\"|\"scene\"|\"all\"]; all also removes chapters), chapters, equations, scene, items, camera.",
     "check:false skips the layout check (faster for a burst of small edits; check again at the end).",
+    "Pointing: focus:[\"eq2\"] (up to 8 ids) rings those items and dims the rest of the board, with nothing drawn; it lasts until your next board_update. " +
+      "Use it while you talk about a term, then go on.",
+    "The learner: board_read ends with what their tab shows (the chapter in view, whether they stepped back, the slider values they set, the item they " +
+      "last clicked, the covers they lifted). It is their view, not a message: read it before you ask or answer.",
   ].join("\n"),
 
   chapters: [
@@ -171,7 +177,8 @@ export const BOARD_DOCS = Object.freeze({
   marks: [
     "scene:{mode:\"append\", shapes:[...]} draws vector marks. mode \"replace\" swaps the whole scene (all shapes and artifacts): use append unless you mean that.",
     "- line: {type:\"line\", points:[[x1,y1],[x2,y2],...], color?, width? (default 2)}",
-    "- arrow: {type:\"arrow\", points: 2-4 points; the last segment gets the arrowhead, color?, width?}",
+    "- arrow: {type:\"arrow\", points: 2-4 points; the last segment gets the arrowhead, color?, width?}, or between two items: " +
+      "{type:\"arrow\", from:\"eq1\", to:\"p1\"} runs from the edge of one to the edge of the other (gap? px clear of each, default 8)",
     "- stroke: {type:\"stroke\", points:[[x,y],...], color?, width? (default 3)}: freehand polyline; give many points for a smooth curve",
     "- rect: {type:\"rect\", x, y, w, h, color? (stroke), fill? (default none)}; x,y = top-left",
     "- ellipse: {type:\"ellipse\", x, y, w, h, color?, fill?}; x,y = top-left of its bounding box",
@@ -303,6 +310,8 @@ export const BOARD_DOCS = Object.freeze({
       "form the next step.",
     "Emphasis uses the same machinery: an ellipse with reveal \"draw\" circles a term; a translucent rect (fill \"#f2c14e33\", color \"none\") with reveal " +
       "\"wipe\" highlights it; \\color and \\boxed work in LaTeX.",
+    "cover:true on any item hides it behind a panel with a question mark until the learner clicks it: draw the question, add the answer covered, " +
+      "ask for a prediction in the terminal, and let them look. board_read says which covers they lifted; {op:\"update\", id, fields:{cover:false}} lifts one for everyone.",
     "SVG artifacts may also contain SMIL animation (animate, animateTransform, animateMotion), which loops inside the drawing.",
   ].join("\n"),
 
@@ -314,6 +323,10 @@ export const BOARD_DOCS = Object.freeze({
     "Sizes: text 18-28 px, headings 30-36 px; equation size 1 is about 27 px; artifacts default to 360x280 (width 80-1200, height 60-800).",
     "Spacing: leave 40 px margins inside a chapter and generous whitespace; put labels next to (not on top of) what they name. " +
       "A derivation column on the left and the diagram on the right works well.",
+    "Next to another item: instead of x,y give below:\"id\" (left edges aligned, 24 px under it) or rightOf:\"id\" (tops aligned, 24 px to its right), " +
+      "with gap? for another distance; an x or y you also give wins for that axis. Works when adding equations, text, rects, ellipses and artifacts. " +
+      "The position is worked out once, from the other item's measured box, and stored as plain x,y (the result shows it); the new item joins the other's chapter. " +
+      "The box is exact for anything drawn by an earlier update; for an item added in the same call (earlier in it) it is an estimate.",
     "Layering: z orders items of every kind (default 0; higher draws on top); opacity 0-1.",
     "Checks: every board_update result reports measured overlaps (text and equations, artifacts), items spilling out of their chapter and " +
       "artifacts that failed to render. board_snapshot returns each item's measured box in board coordinates (subtract the chapter origin for local ones).",
@@ -371,7 +384,8 @@ export const TOOLS = Object.freeze([
       "`baseRevision` = the revision from your last board_read or board_update (compare-and-swap); on a conflict, board_read again and re-apply your change to the current board, never retry blindly. " +
       "Invalid input is rejected with the reason and nothing is applied. " +
       "Each result lists layout warnings (overlaps, items outside their chapter, failed renders): fix them with `items`. " +
-      "Items also take id (short, e.g. \"eq1\"), z, opacity, dash, chapter, step, reveal, duration, order. " +
+      "Items also take id (short, e.g. \"eq1\"), z, opacity, dash, chapter, step, reveal, duration, order, cover; " +
+      "below or rightOf (an item id) place one next to another instead of x,y. " +
       "Formats and examples: board_docs.",
   },
   {
@@ -430,6 +444,13 @@ export function buildSchemas(Type) {
   // Closed objects: a misplaced or misspelled field is a validation error, never silently ignored.
   const Closed = (properties, options) => Type.Object(properties, { additionalProperties: false, ...options });
 
+  // Placement next to another item, instead of x,y (board_docs layout).
+  const Beside = {
+    below: Type.Optional(Type.String()),
+    rightOf: Type.Optional(Type.String()),
+    gap: Type.Optional(Type.Number()),
+  };
+
   const EquationOpSchema = Type.Union([
     Closed({
       op: Type.Literal("add"),
@@ -438,6 +459,8 @@ export function buildSchemas(Type) {
       label: Type.Optional(Type.String()),
       x: Type.Optional(Type.Number({ description: "Omit x,y for auto layout" })),
       y: Type.Optional(Type.Number()),
+      ...Beside,
+      cover: Type.Optional(Type.Boolean()),
       color: Type.Optional(Type.String()),
       size: Type.Optional(Type.Number()),
       z: Type.Optional(Type.Number()),
@@ -478,6 +501,7 @@ export function buildSchemas(Type) {
     reveal: Type.Optional(Reveal),
     duration: Type.Optional(Type.Number()),
     order: Type.Optional(Type.Number()),
+    cover: Type.Optional(Type.Boolean()),
   };
   const Style = { ...TextStyle, dash: Type.Optional(Type.String()) };
 
@@ -492,8 +516,9 @@ export function buildSchemas(Type) {
     Closed({
       type: Type.Literal("rect"),
       ...Style,
-      x: Type.Number(),
-      y: Type.Number(),
+      ...Beside,
+      x: Type.Optional(Type.Number()),
+      y: Type.Optional(Type.Number()),
       w: Type.Number(),
       h: Type.Number(),
       color: Type.Optional(Type.String()),
@@ -502,8 +527,9 @@ export function buildSchemas(Type) {
     Closed({
       type: Type.Literal("ellipse"),
       ...Style,
-      x: Type.Number(),
-      y: Type.Number(),
+      ...Beside,
+      x: Type.Optional(Type.Number()),
+      y: Type.Optional(Type.Number()),
       w: Type.Number(),
       h: Type.Number(),
       color: Type.Optional(Type.String()),
@@ -519,7 +545,10 @@ export function buildSchemas(Type) {
     Closed({
       type: Type.Literal("arrow"),
       ...Style,
-      points: Type.Array(PointSchema, { minItems: 2, maxItems: 4, description: "Last segment gets the head" }),
+      points: Type.Optional(Type.Array(PointSchema, { minItems: 2, maxItems: 4, description: "Last segment gets the head" })),
+      from: Type.Optional(Type.String({ description: "from, to: item ids instead of points" })),
+      to: Type.Optional(Type.String()),
+      gap: Type.Optional(Type.Number()),
       color: Type.Optional(Type.String()),
       width: Type.Optional(Type.Number()),
     }),
@@ -527,8 +556,9 @@ export function buildSchemas(Type) {
       type: Type.Literal("text"),
       ...TextStyle,
       text: Type.String(),
-      x: Type.Number(),
-      y: Type.Number({ description: "Baseline" }),
+      ...Beside,
+      x: Type.Optional(Type.Number()),
+      y: Type.Optional(Type.Number({ description: "Baseline" })),
       size: Type.Optional(Type.Number()),
       font: Type.Optional(Type.Union([Type.Literal("serif"), Type.Literal("sans"), Type.Literal("mono")])),
       anchor: Type.Optional(Type.Union([Type.Literal("start"), Type.Literal("middle"), Type.Literal("end")])),
@@ -588,6 +618,7 @@ export function buildSchemas(Type) {
     items: Type.Optional(
       Type.Array(ItemOpSchema),
     ),
+    focus: Type.Optional(Type.Array(Type.String(), { maxItems: 8, description: "Item ids to point at" })),
     check: Type.Optional(Type.Boolean()),
     scene: Type.Optional(
       Closed({
@@ -674,6 +705,7 @@ function boardItems(board) {
 /** One item as a line of a layout listing: id, type, stored position and size, what it shows. */
 function itemLine(it, where = "", frameStates = {}) {
   const r = (n) => (typeof n === "number" ? Math.round(n) : "?");
+  if (it.cover) where += " [covered]";
   if (it._kind === "artifact")
     return `  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.width)}x${r(it.height)}${it.label ? ` "${it.label}"` : ""}${it.source ? ` (${it.source.length} chars)` : ""}` +
       `${it.params?.length ? ` sliders: ${it.params.map((p) => `${p.name}=${p.value} in [${p.min}, ${p.max}]`).join(", ")}` : ""}${it.libs?.length ? ` libs: ${it.libs.join(", ")}` : ""}${where}` +
@@ -711,6 +743,7 @@ export function summarizeChange(board, touched, removed = [], measured = [], fra
   const cam = board?.camera;
   const out = [];
   if (lines.length) out.push(`added or changed (${lines.length}):`, ...lines.slice(0, MAX_LISTED_CHANGES), ...(lines.length > MAX_LISTED_CHANGES ? [`  ... ${lines.length - MAX_LISTED_CHANGES} more`] : []));
+  if (board?.focus?.length) out.push(`pointing at: ${board.focus.join(", ")} (until your next board_update)`);
   if (removed.length) out.push(`removed (${removed.length}): ${removed.slice(0, MAX_LISTED_CHANGES).join(", ")}${removed.length > MAX_LISTED_CHANGES ? ", ..." : ""}`);
   out.push(
     `board: ${chapters.size} chapter${chapters.size === 1 ? "" : "s"}, ${items.size} item${items.size === 1 ? "" : "s"}` +
@@ -880,7 +913,9 @@ export const handlers = Object.freeze({
       ...s.notices(),
       `The board is running on 127.0.0.1:${s.port}.${s.restoredFrom ? ` (Restored from the autosave of ${s.restoredFrom}.)` : ""}`,
       summarizeBoard(board, focus, frameStatesOf(s)),
+      board.focus?.length ? `focus (you are pointing at): ${board.focus.join(", ")}` : "",
       `revision: ${s.revision}`,
+      typeof s.learnerLine === "function" ? s.learnerLine() : "",
       sceneDetail
         ? `scene detail:\n${sceneDetail.length > 24000 ? sceneDetail.slice(0, 24000) + "\n[Truncated. Use board_save then read the saved JSON for the complete scene.]" : sceneDetail}`
         : "",

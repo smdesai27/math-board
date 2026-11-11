@@ -66,6 +66,7 @@ function setView(v) {
   currentView = v;
   const svg = $("blackboard");
   svg?.setAttribute("viewBox", v.join(" "));
+  $("overlay")?.setAttribute("viewBox", v.join(" "));
   updateViewScale(svg);
   syncFrames();
   refViewMoved();
@@ -152,6 +153,8 @@ function syncCamera(board, first) {
 // viewers watch new steps being drawn; ←/→ step back/forward, r replays the
 // chapter, Space plays on, End returns to live. Snapshots (static) show all.
 const STATIC = NO_FOLLOW || hash.get("static") === "1" || matchMedia("(prefers-reduced-motion: reduce)").matches;
+// Snapshots show the board settled: no fades in progress.
+document.documentElement.classList.toggle("static", STATIC);
 let maxStep = 0;
 // mode "live": new steps are drawn as they arrive (catching up in order);
 // mode "manual": the viewer is stepping/replaying and new steps wait.
@@ -176,6 +179,8 @@ function applyVisibility() {
   syncFrames();
   updateStepUI();
   scheduleRef();
+  decorate();
+  reportView();
 }
 function updateStepUI() {
   const el = $("step-indicator");
@@ -305,6 +310,7 @@ async function playSteps(from, opts = {}) {
     for (let s = from; s <= (opts.until ?? maxStep) && !token.cancelled; s++) {
       shown = Math.max(shown, s);
       updateStepUI();
+      decorate();
       await playStep(s, token, opts);
       if (opts.gap && s < (opts.until ?? maxStep) && !token.cancelled) await sleep(opts.gap);
     }
@@ -349,6 +355,83 @@ function togglePlay() {
   mode = "manual";
   playSteps(shown + 1, { gap: 600, moveCamera: true });
 }
+/* ---------- pointing (focus) and covers ---------- */
+// The tutor points at items with `focus`: they get a ring and the rest of the board dims, until
+// its next update. An item with `cover` stays behind a panel until the learner clicks it; which
+// covers are lifted is this tab's own state. Rings and covers are drawn in #overlay, an SVG over
+// the board with the same view, so nothing is added to the board React renders.
+const SVG_NS = "http://www.w3.org/2000/svg";
+const uncovered = new Set();
+let decorated = "", decorateTries = 0, decorateTimer = 0;
+function svgEl(name, attrs, ...children) {
+  const el = document.createElementNS(SVG_NS, name);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+  el.append(...children);
+  return el;
+}
+function decorate() {
+  const svg = $("blackboard"), layer = $("overlay");
+  if (!svg || !layer) return;
+  layer.setAttribute("viewBox", currentView.join(" "));
+  // Pointing shows on the latest step only: stepped back, the board is as it was then.
+  const focus = new Set(shown >= maxStep ? lastData?.board.focus ?? [] : []);
+  svg.classList.toggle("focusing", focus.size > 0);
+  const marks = [];
+  for (const g of itemGroups()) {
+    const id = g.dataset.id, covered = g.dataset.cover === "1" && !uncovered.has(id);
+    g.classList.toggle("focused", focus.has(id));
+    g.classList.toggle("covered", covered);
+    if (stepOf(g) > shown || (!covered && !focus.has(id))) continue;
+    const el = g.dataset.kind === "equation" ? g.querySelector(".formula") : g;
+    const b = el && boardRect(svg, el);
+    if (b) marks.push({ id, covered, x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w), h: Math.round(b.h) });
+  }
+  // Diagrams decode after the render: look again until they have their size.
+  clearTimeout(decorateTimer);
+  if (window.__board.pending > 0 && decorateTries++ < 40) decorateTimer = setTimeout(decorate, 150);
+  else decorateTries = 0;
+  const key = JSON.stringify(marks);
+  if (key === decorated) return;
+  decorated = key;
+  layer.replaceChildren(...marks.map((m) => {
+    if (!m.covered) return svgEl("rect", { class: STATIC ? "focus-ring still" : "focus-ring", x: m.x - 8, y: m.y - 6, width: m.w + 16, height: m.h + 12, rx: 8 });
+    const cover = svgEl("g", { class: "cover", "data-control": "", "data-cover-for": m.id, role: "button", tabindex: 0, "aria-label": "Covered: click to uncover" },
+      svgEl("rect", { x: m.x - 10, y: m.y - 8, width: m.w + 20, height: m.h + 16, rx: 10 }),
+      svgEl("text", { x: m.x + m.w / 2, y: m.y + m.h / 2, "font-size": Math.max(18, Math.min(44, m.h * 0.6)), "text-anchor": "middle", "dominant-baseline": "central" }, "?"));
+    const lift = () => uncover(m.id);
+    cover.addEventListener("click", lift);
+    cover.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); lift(); } });
+    return cover;
+  }));
+}
+function uncover(id) {
+  uncovered.add(id);
+  const g = itemGroups().find((x) => x.dataset.id === id);
+  if (g) { g.classList.remove("covered"); fadeIn(g, STATIC ? 0 : 350); }
+  decorate();
+  reportView();
+}
+
+/* ---------- what this tab shows, for the tutor's next board_read ---------- */
+// The step on screen, the chapter in view, slider read-outs, the item last clicked and the covers
+// lifted go to the server when they change. It never changes the board or starts a model turn.
+let viewSent = "", viewTimer = 0, lastClicked = null;
+function reportView() {
+  if (NO_FOLLOW) return; // the headless check page is nobody's view
+  clearTimeout(viewTimer);
+  viewTimer = setTimeout(() => {
+    const board = lastData?.board;
+    if (!board) return;
+    const sliders = {};
+    for (const p of document.querySelectorAll("#blackboard > g[data-id] > .plot[data-params]")) sliders[p.parentNode.dataset.id] = p.dataset.params;
+    const body = { step: Math.min(shown, maxStep), steps: maxStep, live: shown >= maxStep, chapter: chaptersOf(board)[currentChapterIndex(board)]?.id ?? null, sliders, clicked: lastClicked, uncovered: [...uncovered] };
+    const key = JSON.stringify(body);
+    if (key === viewSent) return;
+    viewSent = key;
+    request("/api/view", body).catch(() => { viewSent = ""; });
+  }, 700);
+}
+
 /** Called after each committed render. */
 function onRendered(board, first) {
   const prevMax = maxStep;
@@ -1161,7 +1244,7 @@ function Board({ board, revision, frames }) {
       if (!d.el) return null;
       const c = d.chapter && chapters.get(d.chapter);
       const a = d.anim ?? {};
-      return <g key={d.id} data-id={d.id} data-kind={d.kind} data-chapter={c ? c.id : undefined} data-step={a.step ?? 0} data-reveal={a.reveal} data-duration={a.duration} data-order={a.order} transform={c ? `translate(${c.x} ${c.y})` : undefined}>{d.el}</g>;
+      return <g key={d.id} data-id={d.id} data-kind={d.kind} data-chapter={c ? c.id : undefined} data-cover={a.cover ? "1" : undefined} data-step={a.step ?? 0} data-reveal={a.reveal} data-duration={a.duration} data-order={a.order} transform={c ? `translate(${c.x} ${c.y})` : undefined}>{d.el}</g>;
     })}
   </svg></>;
 }
@@ -1322,7 +1405,7 @@ function refViewMoved() {
   if (!REFS || (!refPoint && !refShown)) return;
   if (refShown) showRef(null);
   clearTimeout(refSettle);
-  refSettle = setTimeout(scheduleRef, 120);
+  refSettle = setTimeout(() => { scheduleRef(); reportView(); }, 120);
 }
 function refHover(x, y) { if (REFS) { refPoint = { x, y }; scheduleRef(); } }
 function refLeave() { refPoint = null; scheduleRef(); }
@@ -1333,6 +1416,8 @@ function refClick(e) {
   if (!REFS || e.detail > 1) return; // the second click of a double-click means Follow
   const hit = pickItem(e.clientX, e.clientY);
   if (!hit) return;
+  lastClicked = hit.g.dataset.id;
+  reportView();
   // The reference is read when it is copied, so it has the slider values on screen by then.
   copyTimer = setTimeout(() => { copyTimer = 0; copyRef(refText(itemRef(hit.g))); }, COPY_DELAY);
 }
@@ -1385,6 +1470,9 @@ function render(data) {
   onRendered(data.board, first);
   syncFrames();
   scheduleRef();
+  decorateTries = 0;
+  decorate();
+  reportView();
 }
 const sync = new BoardSync({ request, status: (text) => status(text), render: (data) => render(data) });
 // For the headless check page: read the board now; and whether an html artifact's frame has settled.
@@ -1488,6 +1576,8 @@ const STOPPED_NOTICE = "The board server stopped; reopen it with /board (or boar
 function onConnection(state) {
   bar.dataset.conn = state;
   if (state === "connected") {
+    viewSent = ""; // a restarted server knows nothing of this tab's view
+    reportView();
     notice("");
     status(sync.revision >= 0 ? `Connected · revision ${sync.revision}` : "Connected");
   } else if (state === "reconnecting") status("Connection lost · reconnecting…", false, true);
@@ -1516,6 +1606,8 @@ async function start() {
   // If the server is not reachable, the event stream retries and reports it.
   await sync.refresh().catch((e) => status(e.message, true));
   connect();
+  // A slider the learner moves changes its plot's read-out: report the new values.
+  new MutationObserver(reportView).observe($("surface"), { subtree: true, attributes: true, attributeFilter: ["data-params"] });
   window.addEventListener("pagehide", () => { live?.close(); live = null; });
   window.addEventListener("pageshow", (e) => { if (e.persisted) { connect(); sync.refresh().catch((err) => status(err.message, true)); } });
 }

@@ -339,8 +339,12 @@ export class Snapshotter {
     try {
       await this.waitReady(page, readyTimeout, Boolean(frame));
       // A layout check loads only the frame it checks: the others' slots are measured in the SVG.
+      const revision = this.server.revision;
       if (frame) await this.waitFrames(page, [frame], [frame]);
-      return await page.evaluate((b) => window.__boardLint(b), { x: 0, y: 0, ...BOARD });
+      const lint = await page.evaluate((b) => window.__boardLint(b), { x: 0, y: 0, ...BOARD });
+      // The measured boxes are what below, rightOf and arrows between items are placed from.
+      this.server.noteBoxes?.(lint?.items, revision);
+      return lint;
     } finally {
       await this.pauseFrames(page, true);
     }

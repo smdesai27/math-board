@@ -79,6 +79,7 @@ What this doesn't cover:
 
 **What the page can do**
 
+- The page reports its own view to the server (`POST /api/view`, with the token): the step on screen, the chapter in view, slider read-outs, the item last clicked, the covers lifted. The server keeps only ids that exist on the board, bounded integers and read-outs made of letters, digits and `= . , + −`, so nothing from the page reaches the model as free text. It goes into `board_read` as one line, changes no board state, and never starts a model turn. The headless check page's reports are ignored.
 - The page has no drawing tools. Its only writes are New board, Clear and Save. New board and Clear ask first, and ask again if the board changed in the meantime; all three need the token like every API call, and New board and Clear carry a `baseRevision` like any other change. New board saves before it clears.
 - Nothing the page does starts a model turn. The tutor only learns what changed when it calls `board_read`.
 
