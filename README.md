@@ -1,3 +1,5 @@
+<img src="app/assets/MathBoard.png" width="100" alt="Math Board chalk pi icon">
+
 # math-board
 
 [![CI](https://github.com/smdesai27/math-board/actions/workflows/ci.yml/badge.svg)](https://github.com/smdesai27/math-board/actions/workflows/ci.yml)
@@ -7,6 +9,16 @@ A black chalkboard in the browser that a terminal tutor draws on while it explai
 A terminal tutor has no visual channel, and much of what people learn needs a picture. This gives it one. It's an extension for [pi](https://github.com/earendil-works/pi), a terminal coding agent, and the same tools run as an MCP server for Claude Code and other MCP clients. It's local and free (no cloud, no extra API keys). A [survey](docs/alternatives-2026-10-27.md) of about a hundred existing tools found none that was view-only, local, lesson-structured and agent-driven at once.
 
 ![The board mid-lesson: a free-body diagram of a roller-coaster cart at the top of a loop, with N and mg pointing to the centre, and a text panel on the right with the centripetal acceleration](docs/images/board.png)
+
+## Install the Mac app
+
+[**Download Math Board for macOS**](https://github.com/smdesai27/math-board/releases/latest) · macOS 12+ · Apple Silicon and Intel
+
+Unzip **Math-Board-macOS-universal.zip**, move **Math Board.app** to Applications, and open it. Choose **Help → Copy Agent Setup Prompt**, then paste into your local agent. It will install the companion server and connect itself to the board. The app is a viewer; your agent supplies the lesson and runs the server.
+
+[**Agent setup guide**](docs/agent-setup.md) — instructions you can hand to an agent, including prerequisites, preserving existing boards, and testing the connection. No npm publication is needed: releases include the companion server package too.
+
+The app is ad-hoc signed, not Apple-notarized. On first launch macOS may require **System Settings → Privacy & Security → Open Anyway**; see [Apple's guidance](https://support.apple.com/102445). The app needs no compiler or Node installation; the companion server requires Node 22.19+.
 
 ## Install for pi
 

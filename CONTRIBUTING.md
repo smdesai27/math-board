@@ -9,3 +9,11 @@ Issues and pull requests are welcome. It has a narrow focus, so I may say no to 
 - **One implementation.** Tool schemas, descriptions and handlers live in `tools.mjs`. `index.ts` (pi) and `mcp/server.mjs` (MCP) stay thin adapters, and the tests check that both sides send the model the same thing.
 
 The reasons behind most of this are in [docs/design.md](docs/design.md).
+
+## Mac app releases
+
+`npm run package:app` on macOS builds a universal arm64/x86_64 viewer with its icon and setup guide, then creates the ZIP, companion `.tgz`, guide, and SHA256SUMS in `app/build/release/`. No Node runtime is bundled into the viewer: agents install the companion package and use their local Node.
+
+The **macOS app** workflow validates the app and a clean companion installation on every PR and main push. To publish, update the package and lockfile versions, changelog, and versioned package URL in `docs/agent-setup.md`. Merge after CI passes, then push the matching `vX.Y.Z` tag. The workflow checks the tag matches `package.json` and publishes a GitHub Release with the tested assets. Existing tags/releases are not overwritten.
+
+Downloads are ad-hoc signed, not Developer ID signed or notarized. Until Apple signing credentials are configured in a future release workflow, keep that limitation visible in the README, setup guide, and release notes.

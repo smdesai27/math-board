@@ -1,6 +1,6 @@
 {
   "name": "pi-math-board",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A view-only chalkboard in the browser that a terminal tutor draws on: equations, plots, molecules, diagrams and science illustrations, built up one step at a time. A pi extension and an MCP server.",
   "keywords": [
     "pi-package",
@@ -53,7 +53,9 @@
     "THIRD_PARTY_NOTICES.md",
     "SECURITY.md",
     "CHANGELOG.md",
-    "docs/design.md"
+    "docs/design.md",
+    "app/assets/",
+    "docs/agent-setup.md"
   ],
   "engines": {
     "node": ">=22.19"
@@ -71,7 +73,8 @@
     "test:load": "node scripts/verify-import.mjs && node scripts/verify-reload.mjs",
     "typecheck": "tsc --noEmit",
     "build:icons": "node scripts/build-icons.mjs",
-    "build:app": "sh app/build.sh"
+    "build:app": "sh app/build.sh",
+    "package:app": "sh app/package.sh"
   },
   "overrides": {
     "lodash-es": "4.18.1",

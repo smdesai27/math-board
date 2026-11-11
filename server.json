@@ -9,12 +9,12 @@
     "id": "1440062933"
   },
   "websiteUrl": "https://github.com/smdesai27/math-board#readme",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "pi-math-board",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "transport": {
         "type": "stdio"
       },
@@ -28,7 +28,7 @@
         },
         {
           "name": "MATH_BOARD_DATA_DIR",
-          "description": "Folder for this board's autosave and named saves, used as given (PI_MATH_BOARD_DATA_DIR, the old name, also works). Default: the mcp/ subfolder of the board's data folder. A plain checkout keeps lessons in <package>/.data; an npm or npx install uses a per-user folder: ~/Library/Application Support/math-board on macOS, $XDG_STATE_HOME/math-board or ~/.local/state/math-board on Linux, %LOCALAPPDATA%\\math-board on Windows.",
+          "description": "Folder shared by pi and MCP sessions for the board autosave and named saves. A checkout defaults to <package>/.data; an installed package uses ~/Library/Application Support/math-board on macOS, $XDG_STATE_HOME/math-board or ~/.local/state/math-board on Linux, and %LOCALAPPDATA%\\math-board on Windows. PI_MATH_BOARD_DATA_DIR is also accepted.",
           "isRequired": false,
           "format": "filepath"
         }
