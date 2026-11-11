@@ -10,7 +10,9 @@ Nearly every tool I looked at that lets an agent draw also lets the human draw b
 
 It also keeps the roles clear. The conversation and the learner's answers stay in the terminal. The board is the professor's blackboard, not a shared notebook.
 
-What I can do on the page: pan, zoom, step back and forward, replay a chapter, see the whole lesson, follow the tutor's camera. Hovering an item shows `step n · id · chapter`, and a click copies it, so I can say "step 4, eq2" in the terminal without the page ever talking to the model. Clear and Save are the only buttons that write, and Clear asks again if the board changed while I was deciding.
+What I can do on the page: pan, zoom, step back and forward, replay a chapter, see the whole lesson, follow the tutor's camera. Hovering an item shows `step n · id · chapter`, and a click copies it, so I can say "step 4, eq2" in the terminal without the page ever talking to the model. New board, Clear and Save are the only buttons that write, and the first two ask again if the board changed while I was deciding.
+
+I decide when a new board starts, not the tutor. New board (or `/board new`) saves the lesson under its title and today's date and gives me an empty board; until I press it, the tutor keeps adding chapters to the one that's up, and it's told to ask before drawing on a lesson it doesn't recognise.
 
 Sliders on a plot are the one control that changes what an item shows. They still don't write: the values live in my tab, so the tutor, the snapshots and other tabs see each slider where the tutor set it, and a click on the plot copies a reference with my values, so I can say "with w = 4.5" in the terminal. The expressions they feed are the same JSON the server checked; moving a slider runs no new code.
 
@@ -22,7 +24,7 @@ Because the page never talks to the model, the tutor can't tell on its own wheth
 
 Why: one learner workflow across every agent. If the Claude Code board drifted from the pi one, a learner would have two tools to learn, and every fix would have to happen twice. pi builds the schemas from `tools.mjs` with its own TypeBox when it loads the extension. The MCP server reads them from `mcp/schemas.json`, which `npm run build` writes from the same code, so it needs no TypeBox at runtime. The tests check that both sides send the model identical names, descriptions and JSON schemas, and CI fails if `mcp/schemas.json` is stale.
 
-The two boards are separate on purpose: separate servers, tokens and data folders (the MCP board uses the `mcp/` subfolder), so one agent can never overwrite the other's autosave. Moving a lesson between them is copying a save file.
+One board, though, not one per agent. At first pi and the MCP server each had their own, so one could never overwrite the other's autosave. But a lesson is one thing, and I want to carry on in Claude Code what I started in pi without copying files. Now the first session on a data folder hosts the board and the others join it: their tool calls run in the host, so there's still one state, one revision counter and one writer of the autosave. When the host ends, the next session to need the board hosts it again from the autosave, on the same port with the same token and revision. No background daemon: the board lives exactly as long as some session (or `pi-math-board serve`) wants it.
 
 ## Compare-and-swap revisions
 

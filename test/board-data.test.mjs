@@ -361,3 +361,29 @@ test("moving a plot moves its box, not its data points", () => {
   b = applyUpdate(b, { items: [{ op: "move", id: "l", dx: 1, dy: 2 }] });
   assert.deepEqual(b.scene.shapes[0].points, [[1, 2], [11, 12]]);
 });
+
+test("a new board: the old one is saved under its title and date, then cleared; an empty board is left alone", async () => {
+  const dir = await tempDir();
+  const s = new BoardServer({ dataDir: dir });
+  await s.start();
+  try {
+    assert.deepEqual(await s.fresh(), { saved: null, revision: 0 });
+    const today = new Date().toLocaleDateString("sv");
+    s.update({ title: "Énergie cinétique!", equations: [{ op: "add", id: "ke", latex: "E" }] });
+    await assert.rejects(s.fresh(0), /conflict/, "the board the learner saw is the one that is saved");
+    assert.deepEqual(await s.fresh(1), { saved: `energie-cinetique-${today}`, revision: 2 });
+    assert.equal(s.getState().equations.length, 0);
+    assert.equal(s.getState().title, "Blackboard");
+    assert.equal((await read(path.join(dir, "saves", `energie-cinetique-${today}.json`))).board.equations[0].id, "ke");
+    // The same title again on the same day gets its own name; a board without a usable title too.
+    s.update({ title: "Énergie cinétique!", chapters: [{ op: "add", id: "c", title: "C" }] });
+    assert.equal((await s.fresh()).saved, `energie-cinetique-${today}-2`);
+    s.update({ title: "∑", equations: [{ op: "add", latex: "x" }] });
+    assert.equal((await s.fresh()).saved, `board-${today}`);
+    // Loading the save brings the lesson back.
+    await s.load(`energie-cinetique-${today}`);
+    assert.equal(s.getState().title, "Énergie cinétique!");
+  } finally {
+    await s.stop();
+  }
+});

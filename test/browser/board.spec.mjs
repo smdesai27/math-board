@@ -351,6 +351,21 @@ test("declining the second Clear question keeps the board, and later updates sti
   await expect(page.locator("#board-title")).toHaveText("Still live");
 });
 
+test("New board saves the lesson under its title and date, then starts empty", async ({ page }) => {
+  await ready(page);
+  server.update({ title: "To keep", equations: [{ op: "add", id: "a", latex: "a = 1", x: 100, y: 100 }] });
+  await expect(page.locator("#board-title")).toHaveText("To keep");
+  let asked = "";
+  page.once("dialog", (d) => { asked = d.message(); d.accept(); });
+  await menuClick(page, "#btn-new");
+  const name = `to-keep-${new Date().toLocaleDateString("sv")}`;
+  await expect(page.locator("#conn")).toHaveText(`Saved as ${name} · new board`);
+  expect(asked).toMatch(/saved first/);
+  await expect(page.locator("#blackboard .katex")).toHaveCount(0);
+  expect(await server.listSaves()).toEqual([name]);
+  expect(server.getState().equations).toEqual([]);
+});
+
 test("Save writes the board the learner sees and says so", async ({ page }) => {
   await ready(page);
   server.update({ title: "To keep", equations: [{ op: "add", id: "a", latex: "a = 1", x: 100, y: 100 }] });

@@ -16,7 +16,7 @@ The board is a local web page that a language model writes to. So the questions 
 **Network**
 
 - The server listens on `127.0.0.1` only. Never `0.0.0.0`.
-- The token is 32 random bytes, hex, made the first time a process starts a board. A board restarted in the same pi or MCP process (after `/reload` or `/board stop`) reuses that token and port, so a tab that's still open reconnects; a new process gets a new token.
+- The token is 32 random bytes, hex, made the first time a board starts on a data folder and kept there in `session.json` (0600, like the saves) with the port. The next board on that folder reuses both, so a tab that's still open reconnects and other agent sessions can join the board. Delete `session.json` while no board runs to get a new token.
 - The token travels in the URL fragment (`#token=…`), which the browser never sends to a server. The page reads it and sends `Authorization: Bearer <token>` on every API call. The live update stream (`/api/events`) takes it as a query parameter instead, because `EventSource` can't set headers.
 - The token reaches the model only when no browser could be opened, so the tutor can pass the URL on. Otherwise tool results name just `127.0.0.1:<port>`.
 - The `Host` header must be exactly `127.0.0.1:<port>`, which stops DNS rebinding. An `Origin` header, when present, must be exactly `http://127.0.0.1:<port>`.
@@ -31,7 +31,7 @@ The board is a local web page that a language model writes to. So the questions 
 - Every change carries the revision it was based on (`baseRevision`). A stale write is rejected (HTTP 409, or `isError` from a tool) instead of overwriting newer work.
 - Saves and the autosave are written to a temporary file and renamed, so a crash can't leave half a file. The board creates its folders private (0700) and writes its files private (0600), and it keeps three older copies of the autosave. If a write fails, the next tool result and `/board status` say so.
 - Loading a save, or restoring the autosave, re-validates everything. Whatever it can't use is skipped, never silently: the result says what was skipped and how many. A save from a newer format version is refused rather than misread. An autosave that can't be restored at all is moved aside as `autosave.corrupt-<time>.json` and reported, never overwritten.
-- A `board.lock` file names the process that owns the data folder. Two boards on the same folder still work, but each warns about the other, since the last change wins the autosave.
+- One board per data folder. `board.lock` names the process that hosts it and is created atomically, so of two sessions starting at once one hosts and the other joins. A session that joins checks that the lock's owner really answers as a board on its port (`/api/ping`, which returns the board's instance id and nothing else) and takes over a lock whose owner is gone. A joined session's tool calls run in the host through `POST /api/tool`, behind the same token as every other API call, with the same validation as the host's own. (A `BoardServer` started directly, as the tests do, isn't exclusive: two on one folder both run, and each warns about the other.)
 - `/board export` runs only when I type it, and writes a new folder every time (`-2`, `-3`, …), never over an old one. Its files are private like the saves, and a `viz` that is a symbolic link is refused rather than followed.
 
 **What the model can put on the page**
@@ -79,12 +79,12 @@ What this doesn't cover:
 
 **What the page can do**
 
-- The page has no drawing tools. Its only writes are Clear and Save. Clear asks first, and asks again if the board changed in the meantime; both need the token like every API call, and Clear carries a `baseRevision` like any other change.
+- The page has no drawing tools. Its only writes are New board, Clear and Save. New board and Clear ask first, and ask again if the board changed in the meantime; all three need the token like every API call, and New board and Clear carry a `baseRevision` like any other change. New board saves before it clears.
 - Nothing the page does starts a model turn. The tutor only learns what changed when it calls `board_read`.
 
 ## Out of scope
 
-- Other software running as my own user account. It can read the data folder and the browser's history (which keeps the URL with its token; the token works until the process that made it exits), and it doesn't need the board to do harm.
+- Other software running as my own user account. It can read the data folder (`session.json` holds the token) and the browser's history (which keeps the URL with its token; the token works for as long as `session.json` keeps it), and it doesn't need the board to do harm.
 - Shared machines. Other local users can reach `127.0.0.1`, but not without the token. The token does appear for a moment in the command line of the `open` / `xdg-open` call that launches the browser, which other users can see in the process list. If you share a machine with people you don't trust, keep that in mind.
 - Whatever the model says. The board limits what drawn content can do, not whether it is correct. A prompt injection can still make the tutor draw something wrong or misleading.
 - The pi host and MCP clients themselves. They already run with your permissions.

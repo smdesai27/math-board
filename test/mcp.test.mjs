@@ -33,8 +33,7 @@ const tempDir = () => {
 };
 
 /** Spawn the server over stdio with its own temporary data dir. */
-async function connect() {
-  const dataDir = tempDir();
+async function connect(dataDir = tempDir()) {
   const env = { ...process.env, MATH_BOARD_DATA_DIR: dataDir, MATH_BOARD_NO_BROWSER: "1" };
   delete env.PI_MATH_BOARD_DATA_DIR;
   const transport = new StdioClientTransport({ command: process.execPath, args: [SERVER], cwd: ROOT, env, stderr: "pipe" });
@@ -204,8 +203,7 @@ test("board_save saves to and lists from the temporary data dir, and loads with 
   const file = path.join(s.dataDir, "saves", `${name}.json`);
   assert.ok(text(saved).includes(`File: ${s.dataDir}/saves/${name}.json`), text(saved));
   assert.equal(JSON.parse(readFileSync(file, "utf8")).board.title, "MCP test");
-  assert.equal(existsSync(path.join(ROOT, ".data", "mcp", "saves", `${name}.json`)), false, "not the default data dir");
-  assert.equal(existsSync(path.join(ROOT, ".data", "saves", `${name}.json`)), false, "not pi's data dir");
+  assert.equal(existsSync(path.join(ROOT, ".data", "saves", `${name}.json`)), false, "not the default data dir");
   assert.match(text(await call(s.client, "board_save", { action: "list" })), new RegExp(`^Saved boards: .*\\b${name}\\b`));
 
   const noRevision = await call(s.client, "board_save", { action: "load", name });
@@ -287,5 +285,37 @@ test("SIGTERM stops the board server cleanly and keeps the last update", async (
     assert.doesNotMatch(other.stderr(), /stopping the board server/);
   } finally {
     await other.client.close().catch(() => {});
+  }
+});
+
+test("two MCP servers on one data folder share one board; the second hosts it when the first exits", async () => {
+  const first = await connect();
+  let second;
+  try {
+    const opened = text(await call(first.client, "board_open"));
+    const address = /http:\/\/127\.0\.0\.1:\d+\/#token=[0-9a-f]{64}/.exec(opened)?.[0];
+    assert.ok(address, opened);
+    assert.equal((await call(first.client, "board_update", { baseRevision: 0, title: "shared", equations: [{ op: "add", id: "one", latex: "1" }], check: false })).isError, undefined);
+    second = await connect(first.dataDir);
+    // The second process joins: same address, same board, and its writes land on the first's board.
+    assert.ok(text(await call(second.client, "board_open")).includes(address));
+    const read = text(await call(second.client, "board_read"));
+    assert.match(read, /title: shared/);
+    assert.match(read, /revision: 1/);
+    const drew = await call(second.client, "board_update", { baseRevision: 1, equations: [{ op: "add", id: "two", latex: "2" }], check: false });
+    assert.equal(drew.isError, undefined, text(drew));
+    assert.match(text(await call(first.client, "board_read")), /\[one\][\s\S]*\[two\]/);
+    assert.equal(JSON.parse(readFileSync(path.join(first.dataDir, "board.lock"), "utf8")).pid, first.pid);
+    // The host exits; the joined server's next call hosts the board from the autosave, at the same address.
+    await first.client.close();
+    assert.ok(await waitFor(() => !alive(first.pid)));
+    const after = text(await call(second.client, "board_read"));
+    assert.match(after, /\[one\][\s\S]*\[two\]/);
+    assert.match(after, /revision: 2/);
+    assert.equal(JSON.parse(readFileSync(path.join(first.dataDir, "board.lock"), "utf8")).pid, second.pid);
+    assert.ok(text(await call(second.client, "board_open")).includes(address), "an open tab would reconnect");
+  } finally {
+    await first.client.close().catch(() => {});
+    await second?.client.close().catch(() => {});
   }
 });

@@ -1439,7 +1439,7 @@ function notice(text) {
 }
 const nextPaint = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
 /**
- * The page's only writes (Clear, Save) carry the revision on screen. If the board changed before
+ * The page's only writes (New board, Clear, Save) carry the revision on screen. If the board changed before
  * the write arrived (409), the current board is shown and the learner is asked again.
  */
 async function confirmedWrite(path, body, { ask, again }) {
@@ -1471,6 +1471,13 @@ $("btn-clear").onclick = guarded(() => confirmedWrite("/api/update", { clear: ["
   ask: "Clear the whole board? (Save first if you want to keep it.)",
   again: "Clear the whole board as it is now?",
 }));
+$("btn-new").onclick = guarded(async () => {
+  const r = await confirmedWrite("/api/new", {}, {
+    ask: "Start a new board? This one is saved first, under its title and today's date.",
+    again: "Save the board as it is now and start a new one?",
+  });
+  if (r) status(r.saved ? `Saved as ${r.saved} · new board` : "The board is already empty", true);
+});
 $("btn-save").onclick = guarded(async () => {
   const r = await confirmedWrite("/api/save", { name: "default" }, { again: "Save the board as it is now?" });
   if (r) status(`Saved · revision ${r.saved.revision}`, true);

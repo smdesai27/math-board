@@ -66,6 +66,9 @@ export const BOARD_TEACHING = [
   "Keep one concept per chapter: start a new chapter for a new concept and use the camera to move the learner there. " +
     "Keep board text short (labels, key equations, a few words) and put the explanation in the terminal.",
   "",
+  "The learner decides when a new board starts. If the board holds an unrelated earlier lesson, ask before drawing on it; " +
+    "never clear it yourself.",
+  "",
   "Before you use an artifact type (plot, svg, mermaid, molecule, icon) for the first time, call board_docs for its format.",
   "",
   'The learner may refer to the board as "step 4, eq2": that is a step number and an item id. ' +

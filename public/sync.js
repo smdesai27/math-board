@@ -1,6 +1,6 @@
 /**
  * Browser side of the board's sync. The page never draws: it shows the server's state, follows
- * revision events, and sends the only writes the page has (the Clear and Save buttons) with the
+ * revision events, and sends the only writes the page has (the New board, Clear and Save buttons) with the
  * revision the learner is looking at. A 409 means the board moved on in the meantime: the current
  * board is shown, and the caller asks the learner again.
  */

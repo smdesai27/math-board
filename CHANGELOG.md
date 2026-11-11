@@ -8,6 +8,14 @@
 - Sliders on plots: `params` (up to six, with `min`, `max`, `value`, `step`, `label`, `period`) add slider rows the learner drags or plays, and every expression, point, line and area end of the plot can use them. A point with `drag: true` moves the slider it is bound to. `board_read` lists sliders, and a copied reference includes the learner's values. The teaching text suggests a slider when the lesson is how something changes with a parameter.
 - html artifacts, off unless `MATH_BOARD_HTML=1`: the model's own HTML and JavaScript in a sandboxed frame (opaque origin, its own policy blocking network requests, WebRTC removed, no navigation), with bundled three.js (and OrbitControls), d3, matter.js, lil-gui, fft.js and KaTeX loaded on request. Frames sit in a layer that follows pan, zoom, steps and fades (Safari can't place a frame inside the SVG), load when their chapter comes near the screen, and report ready or their errors, with the source line, to the layout check. Each new frame is loaded in the headless check first, one at a time (a layout check goes through every frame its update added); one that isn't ready within 8 s (an endless loop) or crashes the page is never sent to the learner's browser, and the tool result and `board_read` say so. Frames may not write the clipboard. `&html=off` in the board's address loads no frame in that tab. `board_docs html` documents it, and `/board status` shows whether it's on.
 
+**One shared board**
+
+- Every session on a data folder draws on one board: the first one hosts it, the others join and their tool calls run in the host. When the host ends, the next call from another session hosts the board again from the autosave. pi and the MCP server no longer keep separate boards; the MCP server's old `mcp/` saves are copied over as `mcp-<name>`.
+- A data folder keeps its port and token in `session.json`, and the autosave restores the revision, so the board's address and the tutor's `baseRevision` survive a restart. `MATH_BOARD_PORT` asks for a fixed port.
+- `pi-math-board serve` hosts the board with no agent attached.
+- New board (the page's ⋯ menu, or `/board new`): saves the lesson under its title and today's date, then starts an empty board. The teaching text tells the tutor that the learner decides when a new board starts.
+- `/board status` says when another session hosts the board; `/board stop` then leaves it running.
+
 **Fixes**
 
 - A request the server could not handle (say, a `saves` that is a file) gets an error answer instead of hanging.

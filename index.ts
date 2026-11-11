@@ -3,7 +3,7 @@
  *
  * `/board` opens a full-window page where diagrams and locally rendered KaTeX
  * equations share one coordinate system. The page is view-only (the learner
- * cannot draw; its Clear and Save buttons are the only writes); the model's
+ * cannot draw; its New board, Clear and Save buttons are the only writes); the model's
  * tools update the board and named snapshots preserve lesson stages.
  *
  * The page and the model share one board state with a monotonic `revision`.
@@ -29,8 +29,9 @@
  * subagents; MATH_BOARD_TEACHING=always|never overrides that.
  *
  * Lifecycle & safety:
- *   - Nothing starts at extension load time. The server starts lazily on the
- *     first `/board` command or model tool call, and stops on `session_shutdown`.
+ *   - Nothing starts at extension load time. On the first `/board` command or model
+ *     tool call this session joins the board another session hosts on the same data
+ *     folder, or hosts it (attach.mjs); a board hosted here stops on `session_shutdown`.
  *   - The server binds to 127.0.0.1 only, requires a per-session bearer token,
  *     validates the Host header (loopback only) and any Origin header.
  *   - Request bodies and scenes are bounded and re-validated. Equations use
@@ -51,7 +52,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { nativeImport } from "./native-import.mjs";
 // Types only: the runtime module is imported below through a version-stamped URL.
-import type { BoardServer } from "./server.mjs";
+import type { BoardLink } from "./attach.mjs";
 
 /* ------------------------------------------------------------------ */
 /* Learning folder: teaching guidance in the system prompt             */
@@ -97,7 +98,7 @@ function teachingWanted(cwd: string): boolean {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // The same list as SOURCE_FILES in server.mjs (index.ts included, so the server's stale-source
 // check is re-baselined on every reload); scripts/verify-import.mjs checks that they match.
-const SERVER_FILES = ["server.mjs", "snapshot.mjs", "export.mjs", "tools.mjs", "shared/expr.mjs", "shared/svg.mjs", "index.ts"];
+const SERVER_FILES = ["server.mjs", "snapshot.mjs", "export.mjs", "tools.mjs", "attach.mjs", "shared/expr.mjs", "shared/svg.mjs", "index.ts"];
 /** Import these modules under one version stamp, so tools.mjs gets the same server.mjs instance as this file. */
 function loadSourceModules(files: string[]): Promise<any[]> {
   const stamp = Math.max(
@@ -114,10 +115,11 @@ function loadSourceModules(files: string[]): Promise<any[]> {
 
 export default async function mathBoardExtension(pi: ExtensionAPI) {
   const [
-    { BoardServer: BoardServerClass, defaultDataDir, openBrowser },
+    { defaultDataDir, openBrowser },
     { exportLesson, exportNotice },
-    { TOOLS, buildSchemas, handlers, openText, viewerCount, staleFiles, BOARD_TEACHING },
-  ] = await loadSourceModules(["server.mjs", "export.mjs", "tools.mjs"]);
+    { TOOLS, buildSchemas, openText, staleFiles, BOARD_TEACHING },
+    { BoardLink: BoardLinkClass },
+  ] = await loadSourceModules(["server.mjs", "export.mjs", "tools.mjs", "attach.mjs"]);
 
   /** Warning line when board source files changed after this process loaded them. */
   function staleWarning(): string {
@@ -127,29 +129,21 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
       : "";
   }
 
-  /** Lazily-created, session-scoped board server. `null` until first use. */
-  let server: BoardServer | null = null;
+  /**
+   * This session's link to the board: nothing runs until first use; then it hosts the board or
+   * joins the session that does (attach.mjs).
+   */
+  const link: BoardLink = new BoardLinkClass({
+    dataDir: defaultDataDir(),
+    context: { staleWarning, openHint: "board_open (or /board open)" },
+  });
 
-  async function ensureServer(title?: string): Promise<BoardServer> {
-    const s: BoardServer = (server ??= new BoardServerClass({ dataDir: defaultDataDir("pi"), title }));
+  /** Stop the board if this session hosts it. False when another session does. */
+  async function stopServer(): Promise<boolean> {
     try {
-      await s.start();
-    } catch (error) {
-      if (server === s) server = null;
-      throw error;
-    }
-    return s;
-  }
-
-  async function stopServer(): Promise<void> {
-    const s = server;
-    server = null;
-    if (s) {
-      try {
-        await s.stop();
-      } catch {
-        /* idempotent cleanup */
-      }
+      return await link.stop();
+    } catch {
+      return true; /* idempotent cleanup */
     }
   }
 
@@ -160,8 +154,6 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
   // Schemas are built with pi's TypeBox, so pi validates arguments against exactly what the model sees.
   const schemas = buildSchemas(Type);
   const meta = (name: string): any => TOOLS.find((t: any) => t.name === name);
-  /** What the shared handlers need from pi: the lazy server, the stale-source warning, how to get the URL. */
-  const toolContext = { server: () => ensureServer(), staleWarning, openHint: "board_open (or /board open)" };
   const noBrowser = () => process.env.MATH_BOARD_NO_BROWSER === "1";
 
   /** A board tool with the shared handler; `deferred`, so inactive until board_open or /board activates it. */
@@ -175,7 +167,7 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
       description,
       parameters: schemas[name],
       // The abort signal lets pi cancel a running layout check or snapshot.
-      execute: (_toolCallId, params, signal) => handlers[name]({ ...toolContext, signal }, params),
+      execute: (_toolCallId, params, signal) => link.call(name, params, signal),
     });
   };
 
@@ -203,18 +195,18 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
   }
 
   /**
-   * The one code path behind `/board open` and board_open: start the server (shared, lazy),
+   * The one code path behind `/board open` and board_open: host or join the board (lazy),
    * activate the board tools, and open the browser in the TUI only (never with
    * MATH_BOARD_NO_BROWSER=1). With `unlessViewed`, a board that a browser already shows is not
    * opened again.
    */
   async function openBoard(ctx: ExtensionContext, { unlessViewed = false } = {}) {
-    const s = await ensureServer();
+    const status = await link.status();
     const activationError = activateBoardTools();
-    const viewed = unlessViewed && viewerCount(s) > 0;
-    const opened = ctx.mode === "tui" && !viewed && !noBrowser() ? await openBrowser(s.url) : false;
-    ctx.ui.setStatus("math-board", `⬛ 127.0.0.1:${s.port}`);
-    return { s, opened, viewed, activationError };
+    const viewed = unlessViewed && status.viewers > 0;
+    const opened = ctx.mode === "tui" && !viewed && !noBrowser() ? await openBrowser(link.url) : false;
+    ctx.ui.setStatus("math-board", `⬛ 127.0.0.1:${link.port}`);
+    return { status, opened, viewed, activationError };
   }
 
   const openMeta = meta("board_open");
@@ -225,10 +217,10 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
     description: openMeta.description,
     parameters: schemas.board_open,
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const { s, opened, viewed, activationError } = await openBoard(ctx, { unlessViewed: true });
+      const { status, opened, viewed, activationError } = await openBoard(ctx, { unlessViewed: true });
       // The URL (with its token) reaches the model only when no browser shows the board.
-      const text = openText({ url: s.url, port: s.port, opened, viewed, activationError, staleWarning: staleWarning(), notices: s.notices() });
-      return { content: [{ type: "text", text }], details: { port: s.port, opened, activated: !activationError } };
+      const text = openText({ url: link.url, port: link.port, opened, viewed, activationError, staleWarning: staleWarning(), notices: status.notices });
+      return { content: [{ type: "text", text }], details: { port: link.port, opened, activated: !activationError } };
     },
   });
 
@@ -240,12 +232,13 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
     return [
       "Usage: /board [action]",
       "  /board open       open the board in your browser and turn on the board tools (also /board)",
+      "  /board new        save this board under its title and date, then start an empty one",
       "  /board clear      clear board (add: equations, scene)",
       "  /board save [n]   persist board to disk (name, default 'default'; words are joined with -)",
       "  /board load [n]   load a saved board",
       "  /board export [n] write the lesson to ./viz/board-<n>-<time>/: board.json, a PNG per chapter, lesson.md",
       "  /board status     show server status",
-      "  /board stop       stop the board server",
+      "  /board stop       stop the board server (when this session hosts it)",
     ].join("\n");
   }
 
@@ -255,6 +248,7 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
     getArgumentCompletions: (prefix) => {
       const all = [
         "open",
+        "new",
         "clear",
         "save",
         "load",
@@ -276,47 +270,54 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
       try {
         switch (verb ?? "open") {
           case "open": {
-            const { s, opened, activationError } = await openBoard(ctx);
+            const { opened, activationError } = await openBoard(ctx);
             ctx.ui.notify(
               opened
-                ? `Blackboard opened: ${s.url}`
-                : `Open manually: ${s.url}`,
+                ? `Blackboard opened: ${link.url}`
+                : `Open manually: ${link.url}`,
               "info",
             );
             if (activationError)
               ctx.ui.notify(`Board tools not activated: ${activationError}`, "warning");
             return;
           }
+          case "new": {
+            if (!(await link.find()))
+              return ctx.ui.notify("No board running — /board opens an empty one.", "info");
+            const { saved, revision } = await link.fresh();
+            ctx.ui.notify(saved ? `Saved the board as "${saved}" (/board load ${saved} brings it back). New board (rev ${revision}).` : "The board is already empty.", "info");
+            return;
+          }
           case "clear": {
-            if (!server)
+            // A board another session hosts counts as running: find() joins it, and never starts one.
+            if (!(await link.find()))
               return ctx.ui.notify(
                 "No board running — nothing to clear.",
                 "info",
               );
-            server.clear(rest[0] ? [rest[0]] : ["all"]);
-            ctx.ui.notify(`Board cleared (rev ${server.revision}).`, "info");
+            const revision = await link.clear(rest[0] ? [rest[0]] : ["all"]);
+            ctx.ui.notify(`Board cleared (rev ${revision}).`, "info");
             return;
           }
           case "save": {
-            if (!server)
+            if (!(await link.find()))
               return ctx.ui.notify(
                 "No board running — use /board first.",
                 "info",
               );
-            const saved = await server.save(nameArg ?? "default");
+            const saved = await link.save(nameArg ?? "default");
             ctx.ui.notify(`Saved "${saved.name}" (${saved.savedAt}).`, "info");
             return;
           }
           case "load": {
-            const s = await ensureServer();
             // Compare-and-swap against the revision seen now: an edit that lands
             // while the save file is read makes the load fail instead of clobbering it.
-            const { skipped } = await s.load(nameArg ?? "default", s.revision);
+            const { skipped, revision } = await link.load(nameArg ?? "default");
             const activationError = activateBoardTools(); // the model can read and continue the loaded lesson
             if (activationError)
               ctx.ui.notify(`Board tools not activated: ${activationError}`, "warning");
             ctx.ui.notify(
-              `Loaded "${nameArg ?? "default"}" (rev ${s.revision}). Use /board open to view.${skipped ? `\n  The save had things this board cannot use: ${skipped}.` : ""}`,
+              `Loaded "${nameArg ?? "default"}" (rev ${revision}). Use /board open to view.${skipped ? `\n  The save had things this board cannot use: ${skipped}.` : ""}`,
               skipped ? "warning" : "info",
             );
             return;
@@ -324,58 +325,57 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
           case "export": {
             // Manual only: this command is the sole caller of exportLesson. It reads the
             // running board and never starts one.
-            const s = server;
-            if (s?.starting) await s.starting.catch(() => {});
-            if (!s?.url) {
+            if (!(await link.find())) {
               ctx.ui.notify(
                 "Board not running, nothing to export (start it with /board or /board load <name>).",
                 "info",
               );
               return;
             }
-            const board = s.getState();
-            const revision = s.revision;
+            const { board, revision } = await link.state();
             const result = await exportLesson({
               board,
               revision,
               name: exportName,
               cwd: ctx.cwd,
-              // The capture board_snapshot uses: the server's headless page, a board region, a width.
-              snapshot: async (opts: { region: { x: number; y: number; w: number; h: number }; width: number }) =>
-                (await s.snapshots.capture(opts)).png,
+              // The capture board_snapshot uses: the board's headless page, a board region, a width.
+              snapshot: (opts: { region: { x: number; y: number; w: number; h: number }; width: number }) => link.capture(opts),
             });
+            const now = (await link.status()).revision;
             const changed =
-              s.revision !== revision
-                ? `\n  The board changed during the export (revision ${revision} -> ${s.revision}); images may show the newer state.`
+              now !== revision
+                ? `\n  The board changed during the export (revision ${revision} -> ${now}); images may show the newer state.`
                 : "";
             ctx.ui.notify(exportNotice(result) + changed, result.skipped.length || changed ? "warning" : "info");
             return;
           }
           case "status": {
-            if (!server) {
+            if (!(await link.find())) {
               ctx.ui.notify(
                 "Board server: not running (starts on /board, board_open or other board tool use).",
                 "info",
               );
               return;
             }
-            const notices = server.notices();
+            const st = await link.status();
             ctx.ui.notify(
               [
-                `Board server: running at 127.0.0.1:${server.port} (rev ${server.revision}, started ${server.startedAt}${server.restoredFrom ? `, restored autosave from ${server.restoredFrom}` : ""}, ${server.getState().chapters?.length ?? 0} chapters, ${viewerCount(server)} browser${viewerCount(server) === 1 ? "" : "s"} watching)`,
-                `  data folder: ${server.dataDir}`,
-                `  html artifacts: ${server.html ? "on (MATH_BOARD_HTML=1)" : "off (start pi with MATH_BOARD_HTML=1 to allow them)"}`,
-                ...notices.map((n: string) => `  ${n}`),
-                server.url,
+                `Board server: running at 127.0.0.1:${st.port} (rev ${st.revision}, started ${st.startedAt}${st.restoredFrom ? `, restored autosave from ${st.restoredFrom}` : ""}, ${st.chapters} chapters, ${st.viewers} browser${st.viewers === 1 ? "" : "s"} watching)`,
+                ...(link.hosting ? [] : [`  hosted by another session (process ${st.pid}); this one joined it`]),
+                `  data folder: ${st.dataDir}`,
+                `  html artifacts: ${st.html ? "on (MATH_BOARD_HTML=1)" : `off (start ${link.hosting ? "pi" : "the hosting session"} with MATH_BOARD_HTML=1 to allow them)`}`,
+                ...st.notices.map((n: string) => `  ${n}`),
+                link.url,
               ].join("\n"),
-              notices.length ? "warning" : "info",
+              st.notices.length ? "warning" : "info",
             );
             return;
           }
           case "stop": {
-            await stopServer();
+            const pid = link.hosting ? null : (link as any).remote?.pid;
+            const mine = await stopServer();
             ctx.ui.setStatus("math-board", undefined);
-            ctx.ui.notify("Board server stopped.", "info");
+            ctx.ui.notify(mine ? "Board server stopped." : `Left the board. Another session (process ${pid}) hosts it, so it keeps running.`, "info");
             return;
           }
           case "help":
@@ -406,7 +406,7 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
     event.systemPromptOptions.sections.board_teaching = BOARD_TEACHING;
   });
 
-  // Stop the server when the session goes away (quit, reload, switch, fork).
+  // Stop a board hosted here when the session goes away (quit, reload, switch, fork).
   // Cleanup is idempotent and cheap when nothing is running.
   pi.on("session_shutdown", async () => {
     await stopServer();

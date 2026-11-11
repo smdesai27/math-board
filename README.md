@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/smdesai27/math-board/actions/workflows/ci.yml/badge.svg)](https://github.com/smdesai27/math-board/actions/workflows/ci.yml)
 
-A black chalkboard in the browser that a terminal tutor draws on while it explains, like a professor at a blackboard. The conversation stays in the terminal. The board is view-only: the model puts up equations, plots, molecules, diagrams and science illustrations through tools, one step at a time, and you watch, step back through the lesson, pan and zoom. You never draw on it. The model does. (The page has two buttons that change anything: Clear, which wipes the board after asking, and Save.)
+A black chalkboard in the browser that a terminal tutor draws on while it explains, like a professor at a blackboard. The conversation stays in the terminal. The board is view-only: the model puts up equations, plots, molecules, diagrams and science illustrations through tools, one step at a time, and you watch, step back through the lesson, pan and zoom. You never draw on it. The model does. (The page has three buttons that change anything: New board, which saves the lesson and starts an empty one, Clear, which wipes the board after asking, and Save.)
 
 A terminal tutor has no visual channel, and much of what people learn needs a picture. This gives it one. It's an extension for [pi](https://github.com/earendil-works/pi), a terminal coding agent, and the same tools run as an MCP server for Claude Code and other MCP clients. It's local and free (no cloud, no extra API keys). A [survey](docs/alternatives-2026-10-27.md) of about a hundred existing tools found none that was view-only, local, lesson-structured and agent-driven at once.
 
@@ -43,11 +43,12 @@ Ask the tutor to explain something "on the board". Or:
 /board save <name>     named snapshot (several words become one name: my lesson -> my-lesson)
 /board load <name>     restore it
 /board export [name]   write the lesson to ./viz/: board.json, PNGs, lesson.md
+/board new             save this board under its title and date, then start an empty one
 /board clear           clear everything (or /board clear equations|scene)
-/board stop            stop the server
+/board stop            stop the server (when this session hosts it)
 ```
 
-The server starts on first use and listens only on `127.0.0.1`. The URL carries a private `#token=…`; don't share it. After `/reload` or `/board stop` the next board in the same pi session reuses the port and token, so a tab that's still open reconnects by itself. If the server is gone for good, the page says so after about 10 seconds and keeps trying in the background.
+The server starts on first use and listens only on `127.0.0.1`. The URL carries a private `#token=…`; don't share it. A data folder keeps its port and token (`session.json`), so the board has the same address every time and a tab that's still open reconnects by itself, also after `/reload`, `/board stop` or restarting pi. If the server is gone, the page says so after about 10 seconds and keeps trying in the background.
 
 ## Use it from Claude Code and other MCP clients
 
@@ -60,7 +61,7 @@ claude mcp add math-board -- npx -y pi-math-board              # from npm, once 
 claude mcp add math-board -- node ~/math-board/mcp/server.mjs  # from a checkout, after npm ci
 ```
 
-That registers it for the folder you run it in (scope `local`), so the board and its instructions exist only there; add `--scope user` for every project. `claude mcp list` should show `✔ Connected`, and `/mcp` inside Claude Code reconnects it after you change the code. In pi, use the extension rather than `pi mcp add`: with both you'd get two separate boards.
+That registers it for the folder you run it in (scope `local`), so the board and its instructions exist only there; add `--scope user` for every project. `claude mcp list` should show `✔ Connected`, and `/mcp` inside Claude Code reconnects it after you change the code. In pi, use the extension rather than `pi mcp add`: the extension has `/board` and lazy activation.
 
 Other MCP clients take the same command as a stdio server:
 
@@ -79,8 +80,8 @@ For a checkout, use `"command": "node"` and `"args": ["/absolute/path/to/math-bo
 
 - **Tools**: the seven in [Model tools](#model-tools). All seven are listed from the start (MCP has no lazy activation like pi's); the model calls `board_open` to show the board. `board_snapshot` returns the PNG as an MCP image block, followed by the text summary.
 - **Browser**: `board_open` opens the board in your default browser unless a browser already shows it. The URL, with its token, goes into the model's context only when no browser could be opened; then the model passes it on to you. With `MATH_BOARD_NO_BROWSER=1` it never opens one and always returns the URL: `claude mcp add math-board -e MATH_BOARD_NO_BROWSER=1 -- npx -y pi-math-board`.
-- **Separate boards**: same tools, separate boards. The MCP server hosts its own board server, started by the first tool call that needs it, on `127.0.0.1` with its own token, and keeps its saves in the `mcp/` subfolder of the data folder (see [Install for pi](#install-for-pi)), apart from pi's, so the two never overwrite each other's autosave. `MATH_BOARD_DATA_DIR` overrides it; if you set it for both, give each its own. To continue a lesson in the other agent, copy `saves/<name>.json` across and load it with `board_save`.
-- **Lifecycle and privacy**: stdout carries only JSON-RPC (diagnostics go to stderr), nothing listens beyond loopback, and there is no telemetry. When the client disconnects, or on SIGINT, SIGTERM or SIGHUP, the server flushes the autosave, closes the headless browser and exits. `/board` and `/board export` are pi commands; the MCP server has no counterpart.
+- **One shared board**: pi, Claude Code and every other session on the same data folder draw on one board. The first session that needs it hosts it on `127.0.0.1`; the others join, and their tool calls run in the host. When the hosting session ends, the next tool call from another session hosts the board again from the autosave, at the same address, with the revision counting on. `npx -y pi-math-board serve` (or `node mcp/server.mjs serve`) hosts it with no agent at all, until Ctrl-C, so it outlives every session. To give an agent a board of its own, set `MATH_BOARD_DATA_DIR` for it. (Earlier versions of the MCP server kept its own board in the `mcp/` subfolder: its saves are copied over as `mcp-<name>`, and its autosave if the shared folder has none.)
+- **Lifecycle and privacy**: stdout carries only JSON-RPC (diagnostics go to stderr), nothing listens beyond loopback, and there is no telemetry. When the client disconnects, or on SIGINT, SIGTERM or SIGHUP, a board hosted there flushes the autosave, closes the headless browser and stops, and the process exits. `/board` and `/board export` are pi commands; the MCP server has no counterpart.
 
 ## What the tutor can draw
 
@@ -159,9 +160,9 @@ Rendering defaults, set after building real lessons: Mermaid uses a chalk theme 
 | Whole lesson | `o` (Overview) |
 | Follow the tutor's camera again | `f`, double-click, `0` (Follow) |
 | Point the tutor at an item | hover shows `step n · id · chapter`; a click copies `step n, id (chapter c)` to paste into the terminal |
-| Save, Clear and the shortcut list | `?` (the ⋯ menu); `Esc` closes the bar |
+| New board, Save, Clear and the shortcut list | `?` (the ⋯ menu); `Esc` closes the bar |
 
-At the top sits one small pill with the lesson, the chapter, `step n / N` and a connection dot. Hover it (or tap it on a touch screen) and the controls open below it: steps and Replay, chapters, Overview and Follow, and ⋯ for Save, Clear and the shortcuts. It closes again when the pointer leaves. Panning by hand pauses camera following until you press Follow.
+At the top sits one small pill with the lesson, the chapter, `step n / N` and a connection dot. Hover it (or tap it on a touch screen) and the controls open below it: steps and Replay, chapters, Overview and Follow, and ⋯ for New board, Save, Clear and the shortcuts. It closes again when the pointer leaves. Panning by hand pauses camera following until you press Follow.
 
 ## Model tools
 
@@ -179,10 +180,10 @@ Inside the learning folder (`~/Learn`, or wherever `MATH_BOARD_LEARN_DIR` points
 
 ## Saves and export
 
-- **Autosave**: every change is written, debounced and atomically, to `autosave.json` in the data folder, with three older copies (`autosave.1.json` is the newest). A fresh board server restores it on start, so `/reload` or restarting pi keeps the board. If a write fails (say the folder isn't writable), the next tool result and `/board status` say so. An autosave that can't be restored is moved aside as `autosave.corrupt-<time>.json` and reported, never overwritten. Two boards on the same data folder still work, but each warns about the other, since the last change wins the autosave.
+- **Autosave**: every change is written, debounced and atomically, to `autosave.json` in the data folder, with three older copies (`autosave.1.json` is the newest). A fresh board server restores it on start, so `/reload` or restarting pi keeps the board. If a write fails (say the folder isn't writable), the next tool result and `/board status` say so. An autosave that can't be restored is moved aside as `autosave.corrupt-<time>.json` and reported, never overwritten. The saved revision is restored too, so a tutor's next `baseRevision` still fits after a restart.
 - **Named snapshots**: `/board save <name>`, `board_save` or the Save button write `saves/<name>.json`. Loading re-validates everything; items it can't use are skipped rather than failing the load, and the result lists what was skipped. Saves carry a format version, and a save from a newer version is refused rather than misread.
 - **Export**: `/board export [name]` writes the running board to `viz/board-<name>-<YYYYMMDD-HHMM>/` in pi's current folder, adding `-2`, `-3`, … rather than overwriting. Inside: `board.json` (the named-save format: copy it to `saves/<name>.json` in the data folder and `/board load <name>` opens it), `chapter-<id>.png` for each chapter (1600 px, rendered like `board_snapshot`), `home.png` for items outside the chapters (unless a chapter covers the home board), `overview.png` when there is more than one region, and `lesson.md`, a note with standard markdown image links that Obsidian and GitHub both show. The files are private to you (folders 0700, files 0600, like saves), and a `viz` that is a symbolic link is refused rather than followed. It's manual only: it runs when you type it, never on autosave, on shutdown or from a model tool, and it never starts a board server. Without a headless browser it still writes `board.json` and `lesson.md` and says why the images are missing.
-- **Data folder**: `.data/` in a checkout (git-ignored, so boards never end up in commits), the per-user folder for an installed copy, or `MATH_BOARD_DATA_DIR` (see [Install for pi](#install-for-pi)). The MCP server uses its `mcp/` subfolder, so its board and pi's never share an autosave. The tests and scripts always use temporary folders, so they never touch real saves.
+- **Data folder**: `.data/` in a checkout (git-ignored, so boards never end up in commits), the per-user folder for an installed copy, or `MATH_BOARD_DATA_DIR` (see [Install for pi](#install-for-pi)). Every session on a folder shares its board (`board.lock` names the host, `session.json` the port and token). The tests and scripts always use temporary folders, so they never touch real saves.
 - **Limits**: 200 chapters, 1,000 equations, 5,000 shapes and artifacts in total, 2,000 shapes and 100 artifacts per update, 6 MiB per board, 128 KiB per SVG.
 
 ## Safety
@@ -190,7 +191,7 @@ Inside the learning folder (`~/Learn`, or wherever `MATH_BOARD_LEARN_DIR` points
 The short version. [SECURITY.md](SECURITY.md) has the threat model, what's out of scope, and how to report a problem.
 
 - Loopback-only server, a random bearer token per session, exact Host and Origin checks, bounded request bodies, compare-and-swap revisions, atomic saves.
-- The page is view-only: nobody draws on it. Its only writes are the Clear button (which asks again if the board changed meanwhile) and Save, and nothing it does starts a model turn.
+- The page is view-only: nobody draws on it. Its only writes are New board (saves, then clears), Clear (both ask again if the board changed meanwhile) and Save, and nothing it does starts a model turn.
 - The URL's token reaches the model only when no browser could be opened; otherwise tool results name just `127.0.0.1:<port>`.
 - KaTeX renders with `trust: false`, strict mode and expansion limits. Labels and text are inserted as text, never HTML.
 - SVG, Mermaid, molecules and icons are all displayed through `<image>` (image context: no scripts, no external loads), after validation. Mermaid runs with `securityLevel: "strict"` and rejects links, callbacks, embedded markup and `%%{init}%%` directives. SMILES strings are restricted to SMILES characters. Plot expressions are compiled by a small parser (`shared/expr.mjs`) that only knows arithmetic, a fixed function table and the plot variables (slider names included). Moving a slider changes only the page: it never writes to the board or starts a model turn.

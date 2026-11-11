@@ -47,7 +47,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * (public/ assets are read from disk per request, so they never go stale). index.ts stamps its
  * imports with the same list; keep the two in sync.
  */
-export const SOURCE_FILES = Object.freeze(["server.mjs", "snapshot.mjs", "export.mjs", "tools.mjs", "shared/expr.mjs", "shared/svg.mjs", "index.ts"]);
+export const SOURCE_FILES = Object.freeze(["server.mjs", "snapshot.mjs", "export.mjs", "tools.mjs", "attach.mjs", "shared/expr.mjs", "shared/svg.mjs", "index.ts"]);
 function sourceStamp() {
   return Object.fromEntries(SOURCE_FILES.map((f) => {
     try { return [f, statSync(path.join(__dirname, f)).mtimeMs]; } catch { return [f, 0]; }
@@ -1226,6 +1226,35 @@ function pidAlive(pid) {
 }
 
 const SNAPSHOT_HEADER = "x-math-board-snapshot";
+const TOKEN_RE = /^[a-f0-9]{64}$/;
+/** A tool call forwarded by another session may carry a whole update (a save's worth of SVG). */
+const MAX_TOOL_BODY_BYTES = MAX_BOARD_BYTES;
+
+/**
+ * session.json in a data folder: the token and port its board uses, kept across restarts so an
+ * open tab (or the Mac app) finds the board again and a second session can join the first.
+ * Private like the saves (0600); deleting it gives the next board a new token.
+ */
+export function readSession(dataDir) {
+  try {
+    const s = JSON.parse(readFileSync(path.join(dataDir, "session.json"), "utf8"));
+    return { token: TOKEN_RE.test(s?.token) ? s.token : null, port: Number.isInteger(s?.port) && s.port > 0 && s.port < 65536 ? s.port : null };
+  } catch {
+    return { token: null, port: null };
+  }
+}
+
+/** The lock's owner if it is a board server that answers on its port right now, else null. */
+async function answering(lock) {
+  if (!lock || !Number.isInteger(lock.port)) return null;
+  try {
+    const res = await fetch(`http://127.0.0.1:${lock.port}/api/ping`, { signal: AbortSignal.timeout(1500) });
+    const body = await res.json();
+    return body?.instance === lock.instance ? lock : null;
+  } catch {
+    return null;
+  }
+}
 const firstLine = (err) => String(err?.message ?? err).split("\n")[0];
 
 /* ------------------------------------------------------------------ */
@@ -1233,8 +1262,14 @@ const firstLine = (err) => String(err?.message ?? err).split("\n")[0];
 /* ------------------------------------------------------------------ */
 
 export class BoardServer {
-  constructor({ dataDir, title, autosave = true, kind = "pi", html = htmlEnabled() } = {}) {
+  /**
+   * `exclusive`: one board per data folder. start() then fails with err.hosted = { pid, port }
+   * when another live board server owns the folder (see attach.mjs, which joins it instead).
+   */
+  constructor({ dataDir, title, autosave = true, kind = "pi", html = htmlEnabled(), exclusive = false } = {}) {
     this.dataDir = path.resolve(dataDir ?? defaultDataDir(kind));
+    this.exclusive = exclusive;
+    this.tools = null; // (name, params, { signal, openHint }) => result: runs a model tool here for a session that joined
     this.html = html; // html artifacts allowed (MATH_BOARD_HTML=1)
     // Headless check of each html artifact's frame (by MAC): { state: "ok" | "failed" | "unchecked", reason? }.
     // A learner's page gets a frame only after the check page loaded it without hanging.
@@ -1363,6 +1398,26 @@ export class BoardServer {
     });
     this.saveQueue = job.catch(() => {});
     return job;
+  }
+
+  /**
+   * A new board, started by the learner: the current one is saved under a name made from its
+   * title and today's date (kinetic-energy-2026-11-10, then -2, -3, ...), then cleared. Compare
+   * and swap on baseRevision, so what is saved is the board the learner was looking at. An empty
+   * board is left as it is. Returns { saved: name | null, revision }.
+   */
+  async fresh(baseRevision = this.revision) {
+    this.checkRevision(baseRevision);
+    const b = this.board;
+    if (!b.equations.length && !b.scene.shapes.length && !b.scene.artifacts?.length && !b.chapters?.length) return { saved: null, revision: this.revision };
+    const taken = new Set(await this.listSaves());
+    const slug = String(b.title ?? "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "");
+    const base = `${slug || "board"}-${new Date().toLocaleDateString("sv")}`;
+    let name = base;
+    for (let n = 2; taken.has(name); n++) name = `${base}-${n}`;
+    this.checkRevision(baseRevision); // save() takes the board as it is when called
+    await this.save(name);
+    return { saved: name, revision: this.update({ baseRevision, title: DEFAULT_TITLE, clear: ["all"] }) };
   }
 
   async listSaves() {
@@ -1513,6 +1568,8 @@ export class BoardServer {
     try {
       const { update, dropped } = restoreOps(payload.board, { html: this.html });
       this.apply(update, { strict: false });
+      // Count on from the saved revision, so a tutor's next baseRevision still fits after a restart.
+      if (Number.isSafeInteger(payload.revision) && payload.revision > this.revision) this.revision = payload.revision;
       this.autosavedRevision = this.revision;
       this.restoredFrom = payload.savedAt;
       if (dropped) this.restoreNotice = `Restoring the autosave of ${payload.savedAt}: ${describeDropped(dropped)}.`;
@@ -1544,11 +1601,49 @@ export class BoardServer {
     else if (this.server) this.writeLock();
   }
 
-  writeLock() {
+  writeLock(flag = "w") {
     try {
-      writeFileSync(this.lockFile, JSON.stringify({ pid: process.pid, port: this.port, started: this.startedAt, instance: this.instance }), { mode: 0o600 });
-    } catch {
+      writeFileSync(this.lockFile, JSON.stringify({ pid: process.pid, port: this.port, started: this.startedAt, instance: this.instance }), { mode: 0o600, flag });
+      return true;
+    } catch (err) {
       // An unwritable data folder shows up as a failed autosave.
+      return err?.code !== "EEXIST";
+    }
+  }
+
+  /** The other live board server that owns this data folder (it answers on its port), or null. */
+  async liveOwner() {
+    let lock = null;
+    try {
+      lock = JSON.parse(readFileSync(this.lockFile, "utf8"));
+    } catch {}
+    if (!lock || lock.instance === this.instance) return null;
+    if (lock.pid === process.pid) return LIVE.has(lock.instance) ? lock : null;
+    return pidAlive(lock.pid) ? answering(lock) : null;
+  }
+
+  /**
+   * Take the lock for an exclusive board: created only if no file is there, so of two servers
+   * starting at once exactly one gets it. A lock whose owner is gone is removed and taken.
+   * Returns the live owner when there is one (this server must not run), else null.
+   */
+  async claimLock() {
+    for (let tries = 0; tries < 3; tries++) {
+      if (this.writeLock("wx")) return null;
+      const owner = await this.liveOwner();
+      if (owner) return owner;
+      try {
+        unlinkSync(this.lockFile);
+      } catch {}
+    }
+    return null;
+  }
+
+  writeSession() {
+    try {
+      writeFileSync(path.join(this.dataDir, "session.json"), JSON.stringify({ token: this.token, port: this.port }), { mode: 0o600 });
+    } catch {
+      // As with the lock: an unwritable data folder shows up as a failed autosave.
     }
   }
 
@@ -1572,6 +1667,12 @@ export class BoardServer {
   }
 
   async listen() {
+    await mkdir(this.dataDir, { recursive: true, mode: 0o700 }).catch(() => {});
+    const hosted = (owner) => Object.assign(new Error(`another board server (process ${owner.pid}, port ${owner.port}) hosts ${this.dataDir}`), { hosted: { pid: owner.pid, port: owner.port } });
+    if (this.exclusive) {
+      const owner = await this.liveOwner();
+      if (owner) throw hosted(owner);
+    }
     const server = http.createServer((req, res) => this.handle(req, res));
     // SSE keepalive + socket hygiene
     server.keepAliveTimeout = 5000;
@@ -1585,15 +1686,22 @@ export class BoardServer {
           resolve();
         });
       });
-    // Within one process, a board on the same data folder reuses the last token and port, so a
-    // tab left open across /reload or /board stop reconnects by itself.
+    // A board on the same data folder reuses its last token and port (session.json; within one
+    // process also across /reload), so a tab left open reconnects by itself and other sessions
+    // can join. $MATH_BOARD_PORT asks for a fixed port.
     const previous = SESSIONS.get(this.dataDir);
     const reuse = previous && ![...LIVE].some((id) => previous.owner === id);
+    // A second board on a folder whose first one still runs here keeps to itself: its own token and port.
+    const second = Boolean(previous) && !reuse;
+    const kept = second ? { token: null, port: null } : readSession(this.dataDir);
     if (reuse) this.token = previous.token;
+    else if (kept.token) this.token = kept.token;
+    const asked = Number(process.env.MATH_BOARD_PORT);
+    const port = Number.isInteger(asked) && asked > 0 && asked < 65536 ? asked : reuse ? previous.port : (kept.port ?? 0);
     try {
-      await bind(reuse ? previous.port : 0);
+      await bind(port);
     } catch (err) {
-      if (!reuse || err?.code !== "EADDRINUSE") throw err;
+      if (!port || err?.code !== "EADDRINUSE") throw err;
       await bind(0);
     }
     const addr = server.address();
@@ -1601,11 +1709,21 @@ export class BoardServer {
     this.url = `http://127.0.0.1:${addr.port}/#token=${this.token}`;
     this.server = server;
     this.startedAt = nowIso();
+    if (this.exclusive) {
+      const owner = await this.claimLock();
+      if (owner) {
+        this.server = this.port = this.url = null;
+        await new Promise((resolve) => server.close(resolve));
+        throw hosted(owner);
+      }
+    }
     LIVE.add(this.instance);
     SESSIONS.set(this.dataDir, { token: this.token, port: this.port, owner: this.instance });
-    await mkdir(this.dataDir, { recursive: true, mode: 0o700 }).catch(() => {});
-    this.checkLock(); // notes a live owner; a missing or dead one's lock becomes ours
-    this.writeLock();
+    if (!this.exclusive) {
+      this.checkLock(); // notes a live owner; a missing or dead one's lock becomes ours
+      this.writeLock();
+    }
+    if (!second) this.writeSession();
     await this.restoreAutosave();
     return this;
   }
@@ -1652,9 +1770,9 @@ export class BoardServer {
     }
   }
 
-  async readBody(req, res) {
+  async readBody(req, res, limit = MAX_BODY_BYTES) {
     const declared = Number(req.headers["content-length"] ?? 0);
-    if (declared > MAX_BODY_BYTES) {
+    if (declared > limit) {
       this.json(res, 413, { ok: false, error: "payload too large" });
       return null;
     }
@@ -1665,7 +1783,7 @@ export class BoardServer {
       req.on("data", (c) => {
         if (done) return;
         total += c.length;
-        if (total > MAX_BODY_BYTES) {
+        if (total > limit) {
           done = true;
           this.json(res, 413, { ok: false, error: "payload too large" });
           req.destroy();
@@ -1732,6 +1850,8 @@ export class BoardServer {
       if (req.headers.origin !== undefined && !this.allowedOrigin(req.headers.origin) && !(library && req.headers.origin === "null"))
         return this.json(res, 403, { ok: false, error: "forbidden origin" });
       if (req.method === "GET" && pathname.startsWith("/frame/")) return this.serveFrame(res, pathname.slice("/frame/".length));
+      // Who answers here: lets a session that found this board's lock tell it from a stale one.
+      if (req.method === "GET" && pathname === "/api/ping") return this.json(res, 200, { ok: true, name: "math-board", instance: this.instance });
       // Static app routes (page load carries no auth yet; the app reads the token from the URL
       // fragment and sends it on every API call).
       if (req.method === "GET" && !pathname.startsWith("/api/")) {
@@ -1771,16 +1891,33 @@ export class BoardServer {
         return this.json(res, 200, { ok: true, revision: this.revision, board: this.board, ...this.frames(snapshot) });
       }
       if (req.method === "GET" && pathname === "/api/saves") return this.json(res, 200, { ok: true, saves: await this.listSaves() });
+      if (req.method === "GET" && pathname === "/api/status") return this.json(res, 200, { ok: true, ...this.status() });
 
       if (req.method === "POST") {
-        if (Number(req.headers["content-length"]) > MAX_BODY_BYTES) return this.json(res, 413, { ok: false, error: "payload too large" });
+        const limit = pathname === "/api/tool" ? MAX_TOOL_BODY_BYTES : MAX_BODY_BYTES;
+        if (Number(req.headers["content-length"]) > limit) return this.json(res, 413, { ok: false, error: "payload too large" });
         if (req.headers["content-type"]?.split(";")[0].trim() !== "application/json") return this.json(res, 415, { ok: false, error: "application/json required" });
-        const body = await this.readBody(req, res);
+        const body = await this.readBody(req, res, limit);
         if (body === null) return; // already answered (413/400)
-        if (["/api/update", "/api/clear", "/api/load"].includes(pathname) && !Number.isSafeInteger(body.baseRevision))
+        // Sessions that joined this board (attach.mjs): their model's tool calls run here, and
+        // their /board export asks for the images. A request the caller gave up on is cancelled.
+        if (pathname === "/api/tool" || pathname === "/api/snapshot") {
+          const gone = new AbortController();
+          res.on("close", () => { if (!res.writableEnded) gone.abort(); });
+          if (pathname === "/api/tool") {
+            if (!this.tools || typeof body.name !== "string") return this.json(res, 400, { ok: false, error: "no such tool here" });
+            const result = await this.tools(body.name, body.params ?? {}, { signal: gone.signal, openHint: typeof body.openHint === "string" ? body.openHint.slice(0, 80) : undefined });
+            return this.json(res, 200, { ok: true, result: { content: result.content, ...(result.isError && { isError: true }) } });
+          }
+          const r = body.region;
+          if (r !== undefined && !(r && [r.x, r.y, r.w, r.h].every(Number.isFinite) && r.w >= 10 && r.h >= 10)) return this.json(res, 400, { ok: false, error: "invalid region" });
+          const shot = await this.snapshots.capture({ region: r, width: Number.isFinite(body.width) ? body.width : undefined, signal: gone.signal });
+          return this.json(res, 200, { ok: true, revision: this.revision, png: shot.png.toString("base64"), lint: shot.lint });
+        }
+        if (["/api/update", "/api/clear", "/api/load", "/api/new"].includes(pathname) && !Number.isSafeInteger(body.baseRevision))
           return this.json(res, 400, { ok: false, error: "baseRevision is required" });
         const failed = (err, code = 400) => this.json(res, err.conflict ? 409 : code, { ok: false, error: String(err.message ?? err), revision: this.revision, board: this.board, ...this.frames(snapshot) });
-        const BODY_KEYS = { "/api/clear": keys("baseRevision", "scopes"), "/api/save": keys("baseRevision", "name"), "/api/load": keys("baseRevision", "name") };
+        const BODY_KEYS = { "/api/new": keys("baseRevision"), "/api/clear": keys("baseRevision", "scopes"), "/api/save": keys("baseRevision", "name"), "/api/load": keys("baseRevision", "name") };
         try {
           // A stale page gets the 409 first (with the current board, to re-read and ask again);
           // a save from the page's view must not save a board the learner has not seen.
@@ -1802,6 +1939,13 @@ export class BoardServer {
             try {
               this.update({ baseRevision: body.baseRevision, clear: body.scopes ?? ["all"] });
               return this.json(res, 200, { ok: true, revision: this.revision, board: this.board, ...this.frames(snapshot) });
+            } catch (err) {
+              return failed(err);
+            }
+          case "/api/new":
+            try {
+              const { saved, revision } = await this.fresh(body.baseRevision);
+              return this.json(res, 200, { ok: true, saved, revision, board: this.board, ...this.frames(snapshot) });
             } catch (err) {
               return failed(err);
             }
@@ -1839,6 +1983,23 @@ export class BoardServer {
         } catch {}
       }
     }
+  }
+
+  /** What /board status shows, and what a joined session needs to open the board. */
+  status() {
+    return {
+      instance: this.instance,
+      pid: process.pid,
+      port: this.port,
+      revision: this.revision,
+      startedAt: this.startedAt,
+      restoredFrom: this.restoredFrom,
+      dataDir: this.dataDir,
+      html: this.html,
+      chapters: this.board.chapters?.length ?? 0,
+      viewers: this.viewerCount(),
+      notices: this.notices(),
+    };
   }
 
   allowedOrigin(origin) {

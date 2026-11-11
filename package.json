@@ -38,6 +38,8 @@
     "server.mjs",
     "export.mjs",
     "snapshot.mjs",
+    "attach.mjs",
+    "serve.mjs",
     "native-import.mjs",
     "shared/",
     "mcp/",

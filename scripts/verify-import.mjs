@@ -110,7 +110,7 @@ const startRun = async (cwd) => {
 const teaching = (await startRun(path.join(learnDir, "linear-algebra"))).sections.board_teaching;
 assert.equal(typeof teaching, "string");
 const words = teaching.split(/\s+/).filter(Boolean).length;
-assert.ok(words >= 150 && words <= 220, `board_teaching has ${words} words`);
+assert.ok(words >= 150 && words <= 260, `board_teaching has ${words} words`);
 for (const name of ["board_open", "board_read", "board_update", "board_docs"]) assert.ok(teaching.includes(name), name);
 assert.doesNotMatch(teaching, /\d{1,2}:\d{2}|\/Users\/|\/Volumes\/|~\//); // no clock times or paths
 assert.equal((await startRun(learnDir)).sections.board_teaching, teaching); // the folder itself; same text again
