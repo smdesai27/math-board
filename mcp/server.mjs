@@ -14,6 +14,7 @@
  * serve` hosts, or, when there is none, hosts it here (a BoardServer on 127.0.0.1 only).
  *
  *   npx -y pi-math-board serve                 host the board with no agent, until Ctrl-C
+ *   npx -y pi-math-board watch                 show the board in this terminal pane (sixel graphics)
  *
  * Environment:
  *   MATH_BOARD_DATA_DIR      data folder (also read as PI_MATH_BOARD_DATA_DIR). Default: .data/ in
@@ -36,8 +37,9 @@
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-// `serve` hosts the board without an agent and never returns.
+// `serve` hosts the board without an agent; `watch` shows it in a terminal pane. Neither returns.
 if (process.argv[2] === "serve") await (await import("../serve.mjs")).serve();
+if (process.argv[2] === "watch") await (await import("../watch.mjs")).watch();
 
 const { defaultDataDir, openBrowser } = await import("../server.mjs");
 const { TOOLS, BOARD_TEACHING, openText, staleFiles } = await import("../tools.mjs");

@@ -40,11 +40,14 @@
     "snapshot.mjs",
     "attach.mjs",
     "serve.mjs",
+    "watch.mjs",
     "native-import.mjs",
     "shared/",
     "mcp/",
     "public/",
     "browser/",
+    "app/MathBoard.swift",
+    "app/build.sh",
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
@@ -67,7 +70,8 @@
     "test:browser": "playwright test",
     "test:load": "node scripts/verify-import.mjs && node scripts/verify-reload.mjs",
     "typecheck": "tsc --noEmit",
-    "build:icons": "node scripts/build-icons.mjs"
+    "build:icons": "node scripts/build-icons.mjs",
+    "build:app": "sh app/build.sh"
   },
   "overrides": {
     "lodash-es": "4.18.1",

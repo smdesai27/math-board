@@ -6,3 +6,4 @@ build-meta.json
 playwright-report/
 *.tgz
 .DS_Store
+app/build/

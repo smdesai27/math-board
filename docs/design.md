@@ -88,6 +88,10 @@ How it's fenced: each artifact gets a sandboxed frame with an opaque origin, ser
 
 A frame can't hurt the board page, but it can block it: sandboxed frames from the same host share the page's process in Safari and Chromium, so `while (true) {}` freezes the tab. Each new frame therefore runs first in the headless layout check, one at a time, and my browser gets it only after it reported ready there; a layout check goes through every new frame its update added, so the tutor hears about each one in that update's result. That catches mistakes, not code written to slip past it, so a frozen tab has a way out: `&html=off` after the token loads no frame in that tab. The check page loads frames only during its calls (a layout check just the one it checks, a snapshot all of them) and unloads them afterwards, so no model code runs there between calls, and my own tab loads a frame only when its chapter comes near the screen.
 
+## More than one way to look
+
+The board is a page because a page can draw anything, but a browser is a heavy thing to keep open for one tab. Two lighter viewers sit on the same server. The Mac app is a web view on the board's address with a window that stays where I put it; it holds no state, so it can't disagree with the page. `watch` draws snapshots as sixel graphics in a terminal pane, next to the tutor. That one is deliberately less: a still picture per step. A terminal can't run the page, and pretending it can would mean a second renderer to keep in step with the first.
+
 ## What I left out on purpose
 
 - **Human drawing.** See above. If I want to say something, I say it in the terminal, where the tutor reads it.

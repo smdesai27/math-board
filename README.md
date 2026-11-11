@@ -48,7 +48,7 @@ Ask the tutor to explain something "on the board". Or:
 /board stop            stop the server (when this session hosts it)
 ```
 
-The server starts on first use and listens only on `127.0.0.1`. The URL carries a private `#token=…`; don't share it. A data folder keeps its port and token (`session.json`), so the board has the same address every time and a tab that's still open reconnects by itself, also after `/reload`, `/board stop` or restarting pi. If the server is gone, the page says so after about 10 seconds and keeps trying in the background.
+The server starts on first use and listens only on `127.0.0.1`. The URL carries a private `#token=…`; don't share it. A data folder keeps its port and token (`token.json`), so the board has the same address every time and a tab that's still open reconnects by itself, also after `/reload`, `/board stop` or restarting pi. If the server is gone, the page says so after about 10 seconds and keeps trying in the background.
 
 ## Use it from Claude Code and other MCP clients
 
@@ -82,6 +82,15 @@ For a checkout, use `"command": "node"` and `"args": ["/absolute/path/to/math-bo
 - **Browser**: `board_open` opens the board in your default browser unless a browser already shows it. The URL, with its token, goes into the model's context only when no browser could be opened; then the model passes it on to you. With `MATH_BOARD_NO_BROWSER=1` it never opens one and always returns the URL: `claude mcp add math-board -e MATH_BOARD_NO_BROWSER=1 -- npx -y pi-math-board`.
 - **One shared board**: pi, Claude Code and every other session on the same data folder draw on one board. The first session that needs it hosts it on `127.0.0.1`; the others join, and their tool calls run in the host. When the hosting session ends, the next tool call from another session hosts the board again from the autosave, at the same address, with the revision counting on. `npx -y pi-math-board serve` (or `node mcp/server.mjs serve`) hosts it with no agent at all, until Ctrl-C, so it outlives every session. To give an agent a board of its own, set `MATH_BOARD_DATA_DIR` for it. (Earlier versions of the MCP server kept its own board in the `mcp/` subfolder: its saves are copied over as `mcp-<name>`, and its autosave if the shared folder has none.)
 - **Lifecycle and privacy**: stdout carries only JSON-RPC (diagnostics go to stderr), nothing listens beyond loopback, and there is no telemetry. When the client disconnects, or on SIGINT, SIGTERM or SIGHUP, a board hosted there flushes the autosave, closes the headless browser and stops, and the process exits. `/board` and `/board export` are pi commands; the MCP server has no counterpart.
+
+## A window of its own, or a terminal pane
+
+The board is a web page, so any browser shows it. Two other ways to look at it:
+
+- **Math Board.app (macOS)**: the same page in a window of its own, with no tabs or address bar. It remembers where you put it, can float over the terminal (View > Float on Top, ⇧⌘T), and reconnects by itself when the board comes back. Build and install it from a checkout with `npm run build:app -- --install` (it needs the Xcode command line tools, `xcode-select --install`, and macOS 12 or later). Once it's in `~/Applications` or `/Applications`, `board_open` and `/board` open the board there instead of in the browser; `MATH_BOARD_VIEWER=browser` keeps the browser, and `MATH_BOARD_VIEWER=/path/to/Math Board.app` names another copy. It is a viewer only: it holds no board state and loads nothing but the board's own address on `127.0.0.1`.
+- **A terminal pane**: `npx -y pi-math-board watch` (or `node mcp/server.mjs watch` in a checkout) draws what the tutor's camera shows as sixel graphics and redraws on every change; `o` shows the whole lesson, `r` redraws, `q` quits. It works in tmux 3.4 or later built with sixel (inside a terminal that draws sixel: WezTerm, iTerm2, foot), and in those terminals directly. It is a look at the board, not the board: a still picture per step, with no drawing animation, sliders, covers or hover references. `watch --once` prints one frame and exits.
+
+In a small window the bar shrinks to a dot and the step, and fades until you point at it.
 
 ## What the tutor can draw
 
@@ -192,7 +201,7 @@ Inside the learning folder (`~/Learn`, or wherever `MATH_BOARD_LEARN_DIR` points
 - **Autosave**: every change is written, debounced and atomically, to `autosave.json` in the data folder, with three older copies (`autosave.1.json` is the newest). A fresh board server restores it on start, so `/reload` or restarting pi keeps the board. If a write fails (say the folder isn't writable), the next tool result and `/board status` say so. An autosave that can't be restored is moved aside as `autosave.corrupt-<time>.json` and reported, never overwritten. The saved revision is restored too, so a tutor's next `baseRevision` still fits after a restart.
 - **Named snapshots**: `/board save <name>`, `board_save` or the Save button write `saves/<name>.json`. Loading re-validates everything; items it can't use are skipped rather than failing the load, and the result lists what was skipped. Saves carry a format version, and a save from a newer version is refused rather than misread.
 - **Export**: `/board export [name]` writes the running board to `viz/board-<name>-<YYYYMMDD-HHMM>/` in pi's current folder, adding `-2`, `-3`, … rather than overwriting. Inside: `board.json` (the named-save format: copy it to `saves/<name>.json` in the data folder and `/board load <name>` opens it), `chapter-<id>.png` for each chapter (1600 px, rendered like `board_snapshot`), `home.png` for items outside the chapters (unless a chapter covers the home board), `overview.png` when there is more than one region, and `lesson.md`, a note with standard markdown image links that Obsidian and GitHub both show. The files are private to you (folders 0700, files 0600, like saves), and a `viz` that is a symbolic link is refused rather than followed. It's manual only: it runs when you type it, never on autosave, on shutdown or from a model tool, and it never starts a board server. Without a headless browser it still writes `board.json` and `lesson.md` and says why the images are missing.
-- **Data folder**: `.data/` in a checkout (git-ignored, so boards never end up in commits), the per-user folder for an installed copy, or `MATH_BOARD_DATA_DIR` (see [Install for pi](#install-for-pi)). Every session on a folder shares its board (`board.lock` names the host, `session.json` the port and token). The tests and scripts always use temporary folders, so they never touch real saves.
+- **Data folder**: `.data/` in a checkout (git-ignored, so boards never end up in commits), the per-user folder for an installed copy, or `MATH_BOARD_DATA_DIR` (see [Install for pi](#install-for-pi)). Every session on a folder shares its board (`board.lock` names the host, `token.json` the port and token). The tests and scripts always use temporary folders, so they never touch real saves.
 - **Limits**: 200 chapters, 1,000 equations, 5,000 shapes and artifacts in total, 2,000 shapes and 100 artifacts per update, 6 MiB per board, 128 KiB per SVG, 40 rows and 12 columns per table, 80 lines per code listing, 5,000 values per histogram, 8 MiB per image.
 
 ## Safety
@@ -219,6 +228,7 @@ npm ci                      # includes pi 1.4.0 and TypeScript, for the type che
 npm run build               # bundle the browser app into public/, write mcp/schemas.json and THIRD_PARTY_NOTICES.md
 npm run typecheck           # index.ts against pi's types
 npm run build:icons         # (re)build the icon library (network)
+npm run build:app           # macOS: build app/build/Math Board.app with swiftc (add -- --install for ~/Applications)
 npm test                    # unit, HTTP, hardening, validator and snapshotter tests, and the MCP server over stdio
 npm run test:browser        # Playwright browser tests, in Chromium and WebKit
 npm run test:load           # real pi loader + /reload regression

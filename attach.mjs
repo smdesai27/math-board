@@ -5,7 +5,7 @@
  * A session that finds a live host joins it instead of starting a second board: its model's tool
  * calls run in the host (POST /api/tool), so every session draws on, reads and saves the same
  * board. When the host goes away, the next call from a joined session finds no host and becomes
- * one; the board comes back from its autosave on the same port with the same token (session.json),
+ * one; the board comes back from its autosave on the same port with the same token (token.json),
  * so an open tab reconnects by itself.
  *
  * BoardLink is what the adapters (index.ts, mcp/server.mjs, serve.mjs) hold. Like server.mjs and

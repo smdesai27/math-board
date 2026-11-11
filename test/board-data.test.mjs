@@ -387,3 +387,16 @@ test("a new board: the old one is saved under its title and date, then cleared; 
     await s.stop();
   }
 });
+
+test("the board opens in the Math Board app when it is installed, else in the browser", async () => {
+  const { viewerCommand } = await import("../server.mjs");
+  const url = "http://127.0.0.1:5000/#token=x";
+  const mac = (env, installed) => viewerCommand(url, { plat: "darwin", env, home: "/Users/me", exists: (p) => installed.some((a) => p === `${a}/Contents/MacOS/MathBoard`) });
+  assert.deepEqual(mac({}, []), ["open", url]);
+  assert.deepEqual(mac({}, ["/Users/me/Applications/Math Board.app", "/Applications/Math Board.app"]), ["open", "-a", "/Users/me/Applications/Math Board.app", "--args", "--url", url]);
+  assert.deepEqual(mac({}, ["/Applications/Math Board.app"]), ["open", "-a", "/Applications/Math Board.app", "--args", "--url", url]);
+  assert.deepEqual(mac({ MATH_BOARD_VIEWER: "browser" }, ["/Applications/Math Board.app"]), ["open", url]);
+  assert.deepEqual(mac({ MATH_BOARD_VIEWER: "/opt/Board.app" }, ["/opt/Board.app", "/Applications/Math Board.app"]), ["open", "-a", "/opt/Board.app", "--args", "--url", url]);
+  assert.deepEqual(mac({ MATH_BOARD_VIEWER: "/opt/Missing.app" }, ["/Applications/Math Board.app"]), ["open", url], "a named app that is not there falls back to the browser");
+  assert.deepEqual(viewerCommand(url, { plat: "linux", env: {}, exists: () => true }), ["xdg-open", url]);
+});

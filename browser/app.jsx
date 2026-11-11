@@ -145,6 +145,7 @@ function syncCamera(board, first) {
   lastCameraKey = key;
   const ch = board.camera?.chapter && chaptersOf(board).find((c) => c.id === board.camera.chapter);
   $("board-title").textContent = [board.title, ch?.title].filter(Boolean).join("  ·  ");
+  document.title = board.title || "Blackboard"; // the tab's, or the Mac app's window title
 }
 
 
@@ -357,8 +358,9 @@ function togglePlay() {
   playSteps(shown + 1, { gap: 600, moveCamera: true });
 }
 /* ---------- pointing (focus) and covers ---------- */
-// The tutor points at items with `focus`: they get a ring and the rest of the board dims, until
-// its next update. An item with `cover` stays behind a panel until the learner clicks it; which
+// The tutor points at items with `focus`: they get a ring and the rest of the board dims (a dark
+// veil over the whole view with a hole at each of them: opacity on the items themselves does not
+// reach math drawn as HTML inside the SVG in WebKit), until its next update. An item with `cover` stays behind a panel until the learner clicks it; which
 // covers are lifted is this tab's own state. Rings and covers are drawn in #overlay, an SVG over
 // the board with the same view, so nothing is added to the board React renders.
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -376,11 +378,9 @@ function decorate() {
   layer.setAttribute("viewBox", currentView.join(" "));
   // Pointing shows on the latest step only: stepped back, the board is as it was then.
   const focus = new Set(shown >= maxStep ? lastData?.board.focus ?? [] : []);
-  svg.classList.toggle("focusing", focus.size > 0);
   const marks = [];
   for (const g of itemGroups()) {
     const id = g.dataset.id, covered = g.dataset.cover === "1" && !uncovered.has(id);
-    g.classList.toggle("focused", focus.has(id));
     g.classList.toggle("covered", covered);
     if (stepOf(g) > shown || (!covered && !focus.has(id))) continue;
     const el = g.dataset.kind === "equation" ? g.querySelector(".formula") : g;
@@ -394,7 +394,9 @@ function decorate() {
   const key = JSON.stringify(marks);
   if (key === decorated) return;
   decorated = key;
-  layer.replaceChildren(...marks.map((m) => {
+  const lit = marks.filter((m) => !m.covered);
+  const veil = lit.length ? [svgEl("path", { class: "focus-veil", "fill-rule": "evenodd", d: `M-1e6-1e6H1e6V1e6H-1e6Z${lit.map((m) => `M${m.x - 8} ${m.y - 6}h${m.w + 16}v${m.h + 12}h${-(m.w + 16)}Z`).join("")}` })] : [];
+  layer.replaceChildren(...veil, ...marks.map((m) => {
     if (!m.covered) return svgEl("rect", { class: STATIC ? "focus-ring still" : "focus-ring", x: m.x - 8, y: m.y - 6, width: m.w + 16, height: m.h + 12, rx: 8 });
     const cover = svgEl("g", { class: "cover", "data-control": "", "data-cover-for": m.id, role: "button", tabindex: 0, "aria-label": "Covered: click to uncover" },
       svgEl("rect", { x: m.x - 10, y: m.y - 8, width: m.w + 20, height: m.h + 16, rx: 10 }),
@@ -1544,6 +1546,9 @@ function refClick(e) {
   copyTimer = setTimeout(() => { copyTimer = 0; copyRef(refText(itemRef(hit.g))); }, COPY_DELAY);
 }
 async function copyText(text) {
+  // In the Mac app the window copies (a web view may refuse the clipboard after the click's short wait).
+  const native = window.webkit?.messageHandlers?.mathBoard;
+  if (native) { try { native.postMessage({ copy: text }); return true; } catch { /* fall through */ } }
   try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through */ }
   // No async clipboard (or it was refused): copy from a hidden, read-only textarea.
   const ta = document.createElement("textarea"), prev = document.activeElement;

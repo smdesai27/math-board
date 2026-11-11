@@ -11,10 +11,16 @@
 **One shared board**
 
 - Every session on a data folder draws on one board: the first one hosts it, the others join and their tool calls run in the host. When the host ends, the next call from another session hosts the board again from the autosave. pi and the MCP server no longer keep separate boards; the MCP server's old `mcp/` saves are copied over as `mcp-<name>`.
-- A data folder keeps its port and token in `session.json`, and the autosave restores the revision, so the board's address and the tutor's `baseRevision` survive a restart. `MATH_BOARD_PORT` asks for a fixed port.
+- A data folder keeps its port and token in `token.json`, and the autosave restores the revision, so the board's address and the tutor's `baseRevision` survive a restart. `MATH_BOARD_PORT` asks for a fixed port.
 - `pi-math-board serve` hosts the board with no agent attached.
 - New board (the page's ⋯ menu, or `/board new`): saves the lesson under its title and today's date, then starts an empty board. The teaching text tells the tutor that the learner decides when a new board starts.
 - `/board status` says when another session hosts the board; `/board stop` then leaves it running.
+
+**Viewers**
+
+- Math Board.app (macOS): the board in a window of its own. `npm run build:app -- --install` builds it with `swiftc`; once installed, `board_open` opens the board there (`MATH_BOARD_VIEWER=browser` keeps the browser).
+- `pi-math-board watch`: the board in a terminal pane as sixel graphics, redrawn on every change (tmux 3.4+ with sixel, WezTerm, iTerm2, foot).
+- In a small window the bar shrinks and fades; the tab's title is the lesson's.
 
 **New things to draw**
 

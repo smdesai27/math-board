@@ -24,7 +24,7 @@
 import http from "node:http";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { copyFile, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1541,13 +1541,13 @@ const TOKEN_RE = /^[a-f0-9]{64}$/;
 const MAX_TOOL_BODY_BYTES = MAX_BOARD_BYTES;
 
 /**
- * session.json in a data folder: the token and port its board uses, kept across restarts so an
+ * token.json in a data folder: the token and port its board uses, kept across restarts so an
  * open tab (or the Mac app) finds the board again and a second session can join the first.
  * Private like the saves (0600); deleting it gives the next board a new token.
  */
 export function readSession(dataDir) {
   try {
-    const s = JSON.parse(readFileSync(path.join(dataDir, "session.json"), "utf8"));
+    const s = JSON.parse(readFileSync(path.join(dataDir, "token.json"), "utf8"));
     return { token: TOKEN_RE.test(s?.token) ? s.token : null, port: Number.isInteger(s?.port) && s.port > 0 && s.port < 65536 ? s.port : null };
   } catch {
     return { token: null, port: null };
@@ -2052,7 +2052,7 @@ export class BoardServer {
 
   writeSession() {
     try {
-      writeFileSync(path.join(this.dataDir, "session.json"), JSON.stringify({ token: this.token, port: this.port }), { mode: 0o600 });
+      writeFileSync(path.join(this.dataDir, "token.json"), JSON.stringify({ token: this.token, port: this.port }), { mode: 0o600 });
     } catch {
       // As with the lock: an unwritable data folder shows up as a failed autosave.
     }
@@ -2097,7 +2097,7 @@ export class BoardServer {
           resolve();
         });
       });
-    // A board on the same data folder reuses its last token and port (session.json; within one
+    // A board on the same data folder reuses its last token and port (token.json; within one
     // process also across /reload), so a tab left open reconnects by itself and other sessions
     // can join. $MATH_BOARD_PORT asks for a fixed port.
     const previous = SESSIONS.get(this.dataDir);
@@ -2556,12 +2556,29 @@ export class BoardServer {
   }
 }
 
-/** Open a URL in the default browser (best effort; macOS and Linux). */
+/**
+ * The command that shows the board to the learner: [program, ...arguments]. On macOS the Math
+ * Board app (app/build.sh --install puts it in ~/Applications) when it is installed, else the
+ * default browser. $MATH_BOARD_VIEWER decides otherwise: "browser" never uses the app, and a
+ * path ending in .app names the app to use.
+ */
+export function viewerCommand(url, { plat = platform(), env = process.env, exists = existsSync, home = homedir() } = {}) {
+  if (plat !== "darwin") return ["xdg-open", url];
+  const wanted = env.MATH_BOARD_VIEWER;
+  if (wanted === "browser") return ["open", url];
+  const apps = wanted?.endsWith(".app") ? [wanted] : [path.join(home, "Applications", "Math Board.app"), "/Applications/Math Board.app"];
+  const app = apps.find((a) => exists(path.join(a, "Contents", "MacOS", "MathBoard")));
+  // A running app keeps its window and ignores the arguments: it already shows this address,
+  // which a data folder keeps (token.json), and `open` brings it to the front.
+  return app ? ["open", "-a", app, "--args", "--url", url] : ["open", url];
+}
+
+/** Show a board address to the learner: the Mac app or the default browser (best effort; macOS and Linux). */
 export async function openBrowser(url) {
-  const cmd = platform() === "darwin" ? "open" : "xdg-open";
+  const [cmd, ...args] = viewerCommand(url);
   try {
     const { execFile } = await import("node:child_process");
-    await new Promise((resolve, reject) => execFile(cmd, [url], { timeout: 10000 }, (err) => (err ? reject(err) : resolve())));
+    await new Promise((resolve, reject) => execFile(cmd, args, { timeout: 10000 }, (err) => (err ? reject(err) : resolve())));
     return true;
   } catch {
     return false;

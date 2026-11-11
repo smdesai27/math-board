@@ -40,8 +40,13 @@ test("focus rings the items the tutor points at and dims the rest, until its nex
   expect(r.x + r.width).toBeGreaterThan(f.x + f.width);
   expect(r.y + r.height).toBeGreaterThan(f.y + f.height);
   expect(r.width).toBeLessThan(f.width + 60);
-  await expect.poll(() => opacity(page, "note")).toBeLessThan(0.5);
-  expect(await opacity(page, "q")).toBe(1);
+  // The rest of the board is under a dark veil, with a hole where the ring is.
+  const veil = page.locator("#overlay .focus-veil");
+  await expect(veil).toHaveCount(1);
+  expect(await veil.getAttribute("d")).toContain(`M${await ring.getAttribute("x")} ${await ring.getAttribute("y")}h${await ring.getAttribute("width")}`);
+  const under = (id) => page.locator(`#blackboard g[data-id="${id}"]`).evaluate((g) => { const r = (g.querySelector(".formula") ?? g).getBoundingClientRect(); const v = document.querySelector("#overlay .focus-veil"); const p = new DOMPoint(r.x + r.width / 2, r.y + r.height / 2).matrixTransform(v.getScreenCTM().inverse()); return v.isPointInFill(p); });
+  expect(await under("note")).toBe(true);
+  expect(await under("q")).toBe(false);
   // Panning keeps the ring on its item.
   await page.keyboard.press("Shift+ArrowRight");
   await expect.poll(async () => Math.round((await ring.boundingBox()).x - (await page.locator('#blackboard g[data-id="q"] .formula').boundingBox()).x)).toBe(Math.round(r.x - f.x));
@@ -52,7 +57,7 @@ test("focus rings the items the tutor points at and dims the rest, until its nex
   await expect(ring).toHaveCount(1);
   server.update({ title: "on we go" });
   await expect(ring).toHaveCount(0);
-  await expect.poll(() => opacity(page, "note")).toBe(1);
+  await expect(veil).toHaveCount(0);
   // The layout check still measures every item while one is pointed at.
   server.update({ focus: ["note"] });
   await expect(ring).toHaveCount(1);
