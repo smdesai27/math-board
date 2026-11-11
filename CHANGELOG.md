@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-11-11)
+
+**Install and connect**
+
+- A universal Mac app download for Apple Silicon and Intel, with the subtle chalk pi icon.
+- Help menu setup prompt and a bundled agent setup guide; the first-launch window points to them.
+- GitHub releases include the companion server package, setup guide, and SHA-256 checksums. Version tags build and publish the downloads automatically.
+- The app is ad-hoc signed, not Apple-notarized; the installation instructions explain the first-open step.
 
 **The board**
 

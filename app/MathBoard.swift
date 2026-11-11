@@ -159,7 +159,7 @@ final class BoardController: NSObject, NSApplicationDelegate, WKUIDelegate, WKNa
         let known = candidateURLs()
         guard !known.isEmpty else {
             url = nil
-            show("No board found.\n\nAsk the tutor to open the board (board_open, or /board in pi), then choose View > Reload.")
+            show("Welcome to Math Board.\n\nChoose Help > Copy Agent Setup Prompt and paste it into your agent.\nAlready connected? Ask your tutor to open the board.\nThis window connects by itself.")
             retry = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in self?.connect() }
             return
         }
@@ -310,8 +310,24 @@ final class BoardController: NSObject, NSApplicationDelegate, WKUIDelegate, WKNa
         win.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         win.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         let winItem = NSMenuItem(); winItem.submenu = win; main.addItem(winItem)
+        let help = NSMenu(title: "Help")
+        help.addItem(withTitle: "Copy Agent Setup Prompt", action: #selector(copySetupPrompt), keyEquivalent: "").target = self
+        help.addItem(withTitle: "Agent Setup Guide", action: #selector(openSetupGuide), keyEquivalent: "").target = self
+        let helpItem = NSMenuItem(); helpItem.submenu = help; main.addItem(helpItem)
         NSApp.mainMenu = main
         NSApp.windowsMenu = win
+        NSApp.helpMenu = help
+    }
+
+    @objc func copySetupPrompt() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("Connect yourself to Math Board on this Mac. Read https://github.com/smdesai27/math-board/blob/main/docs/agent-setup.md and follow its setup instructions for your client. Preserve my existing MCP configuration and boards. Then call board_open and board_read to verify the connection without clearing my board.", forType: .string)
+    }
+
+    @objc func openSetupGuide() {
+        if let guide = Bundle.main.url(forResource: "Agent Setup", withExtension: "md") {
+            NSWorkspace.shared.open(guide)
+        }
     }
 
     @objc func reload() { connect() }

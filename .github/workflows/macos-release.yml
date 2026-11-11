@@ -1,0 +1,73 @@
+name: macOS app
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Check release version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: test "$GITHUB_REF_NAME" = "v$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')"
+      - name: Build universal app and companion package
+        run: sh app/package.sh
+      - name: Verify app and archive
+        run: |
+          codesign --verify --deep --strict 'app/build/Math Board.app'
+          lipo -verify_arch arm64 x86_64 'app/build/Math Board.app/Contents/MacOS/MathBoard'
+          plutil -lint 'app/build/Math Board.app/Contents/Info.plist'
+          test -s 'app/build/Math Board.app/Contents/Resources/MathBoard.icns'
+          test -s 'app/build/Math Board.app/Contents/Resources/Agent Setup.md'
+          cd app/build/release
+          shasum -a 256 -c SHA256SUMS
+      - name: Verify installed companion package
+        run: |
+          npm ci
+          npm install --prefix "$RUNNER_TEMP/math-board-install" --omit=dev --omit=peer "$PWD/app/build/release/pi-math-board-$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version').tgz"
+          node scripts/verify-package.mjs "$RUNNER_TEMP/math-board-install/node_modules/pi-math-board/mcp/server.mjs"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: math-board-macos
+          path: app/build/release/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: math-board-macos
+          path: release
+      - name: Publish download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cat > notes.md <<'NOTES'
+          Download **Math-Board-macOS-universal.zip**, unzip, and move **Math Board.app** into Applications. macOS 12+, Apple Silicon and Intel.
+
+          Open the app, choose **Help → Copy Agent Setup Prompt**, and paste it into your local agent. The agent installs the companion server and connects through MCP. See **Agent-Setup.md** below for prerequisites, setup, verification, and updates. The viewer needs no Node installation; the companion server needs Node 22.19+.
+
+          This app is ad-hoc signed, **not Apple-notarized**. If macOS blocks it, use Privacy & Security → Open Anyway only if you trust the project. See https://support.apple.com/102445. No security settings need to be disabled.
+
+          The `.tgz` is the companion server for agents; the ZIP is the Mac app. SHA256SUMS covers both and the setup guide.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" release/* --verify-tag --title "Math Board $GITHUB_REF_NAME" --notes-file notes.md
