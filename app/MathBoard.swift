@@ -58,13 +58,17 @@ func defaultDataDir() -> String {
     return (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support/math-board")
 }
 
-/// Where to look, in order: --url, --data-dir, the address given last time, the default data folder.
-/// Several may be known; the first whose server answers is shown.
+/// The addresses this app was asked to show, newest first: --url at launch, then each address
+/// board_open left in `lastURL` before it brought the running app to the front.
+var wanted: [URL] = [boardURL(argument("--url"))].compactMap { $0 }
+
+/// Where to look, in order: --data-dir alone; else the addresses asked for, the address given
+/// last time and the default data folder. Several may be known; the first whose server answers
+/// is shown.
 func candidateURLs() -> [URL] {
-    if let url = boardURL(argument("--url")) { return [url] }
     if let dir = argument("--data-dir") { return [discover(in: dir)].compactMap { $0 } }
-    var found: [URL] = []
-    if let dir = defaults.string(forKey: "dataDir"), let url = discover(in: dir) { found.append(url) }
+    var found: [URL] = wanted
+    if let dir = defaults.string(forKey: "dataDir"), let url = discover(in: dir), !found.contains(url) { found.append(url) }
     if let url = boardURL(defaults.string(forKey: "lastURL")), !found.contains(url) { found.append(url) }
     if let url = discover(in: defaultDataDir()), !found.contains(url) { found.append(url) }
     return found
@@ -80,6 +84,7 @@ final class BoardController: NSObject, NSApplicationDelegate, WKUIDelegate, WKNa
     var placeholder: NSTextField!
     var url: URL?
     var retry: Timer?
+    var watch: Timer?
     var titleWatch: NSKeyValueObservation?
     let snapshotFile = argument("--snapshot")
 
@@ -133,10 +138,17 @@ final class BoardController: NSObject, NSApplicationDelegate, WKUIDelegate, WKNa
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    // `open -a "Math Board" --args --url ...` while the app runs starts no second copy; macOS
-    // hands a reopen to this one, which shows its window again.
+    // `open -a "Math Board" --args --url ...` while the app runs starts no second copy and the
+    // arguments are dropped; macOS hands a reopen to this one, which shows its window again.
+    // board_open writes the address to `lastURL` first, so a board other than the one on screen
+    // (another data folder, or a new token) is picked up here.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         window.makeKeyAndOrderFront(nil)
+        defaults.synchronize()
+        if argument("--data-dir") == nil, let asked = boardURL(defaults.string(forKey: "lastURL")), asked != url || web.isHidden {
+            wanted = [asked] + wanted.filter { $0 != asked }
+            connect()
+        }
         return true
     }
 
@@ -160,8 +172,15 @@ final class BoardController: NSObject, NSApplicationDelegate, WKUIDelegate, WKNa
             retry = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in self?.connect() }
             return
         }
-        // Only the board can answer the question (see pingKey in server.mjs); a program that
-        // merely listens on its port is not shown and never sees the token.
+        answers(url) { [weak self] ok in
+            guard let self = self else { return }
+            ok ? self.load(url) : self.tryBoard(known.dropFirst())
+        }
+    }
+
+    /// Whether the board at `url` answers. Only the board can answer the question (see pingKey in
+    /// server.mjs); a program that merely listens on its port is not shown and never sees the token.
+    func answers(_ url: URL, then: @escaping (Bool) -> Void) {
         func hmac(_ key: String, _ message: String) -> String {
             HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: SymmetricKey(data: Data(key.utf8))).map { String(format: "%02x", $0) }.joined()
         }
@@ -174,20 +193,40 @@ final class BoardController: NSObject, NSApplicationDelegate, WKUIDelegate, WKNa
         ping.queryItems = [URLQueryItem(name: "n", value: nonce)]
         var request = URLRequest(url: ping.url!)
         request.timeoutInterval = 1.5
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+        URLSession.shared.dataTask(with: request) { data, _, _ in
             let body = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                guard body?["name"] as? String == "math-board", body?["proof"] as? String == proof else { return self.tryBoard(known.dropFirst()) }
-                self.url = url
-                if argument("--url") != nil { defaults.set(url.absoluteString, forKey: "lastURL") }
-                self.placeholder.isHidden = true
-                self.web.isHidden = false
-                // A snapshot shows the board at rest (the page's static mode: nothing mid-fade).
-                let shown = self.snapshotFile == nil ? url : URL(string: url.absoluteString + "&static=1") ?? url
-                self.web.load(URLRequest(url: shown))
-            }
+            DispatchQueue.main.async { then(body?["name"] as? String == "math-board" && body?["proof"] as? String == proof) }
         }.resume()
+    }
+
+    func load(_ url: URL) {
+        self.url = url
+        if wanted.contains(url) { defaults.set(url.absoluteString, forKey: "lastURL") }
+        placeholder.isHidden = true
+        web.isHidden = false
+        // A snapshot shows the board at rest (the page's static mode: nothing mid-fade).
+        let shown = snapshotFile == nil ? url : URL(string: url.absoluteString + "&static=1") ?? url
+        web.load(URLRequest(url: shown))
+        // The page reconnects to its own address by itself. A board that came back at another
+        // address (a new token, another known folder) is found here: the page on screen stays
+        // until one answers.
+        watch?.invalidate()
+        if snapshotFile == nil { watch = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.lookElsewhere() } }
+    }
+
+    func lookElsewhere() {
+        guard let shown = url, !web.isHidden else { return }
+        answers(shown) { [weak self] ok in
+            guard let self = self, !ok, self.url == shown else { return }
+            func next(_ rest: ArraySlice<URL>) {
+                guard let other = rest.first else { return }
+                self.answers(other) { ok in
+                    guard self.url == shown else { return }
+                    ok ? self.load(other) : next(rest.dropFirst())
+                }
+            }
+            next(candidateURLs().filter { $0 != shown }[...])
+        }
     }
 
     func show(_ message: String) {

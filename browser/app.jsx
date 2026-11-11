@@ -398,6 +398,13 @@ function decorate() {
   const svg = $("blackboard"), layer = $("overlay");
   if (!svg || !layer) return;
   layer.setAttribute("viewBox", currentView.join(" "));
+  // A cover lifted stays lifted only while its item is on the board with a cover: an id used
+  // again later (eq2 after eq2 was deleted) starts covered.
+  const board = lastData?.board;
+  if (board && uncovered.size) {
+    const covers = new Set([...board.equations, ...board.scene.shapes, ...(board.scene.artifacts ?? [])].filter((it) => it.cover).map((it) => it.id));
+    for (const id of [...uncovered]) if (!covers.has(id)) uncovered.delete(id);
+  }
   // Pointing shows on the latest step only: stepped back, the board is as it was then.
   const focus = new Set(shown >= maxStep ? lastData?.board.focus ?? [] : []);
   const marks = [];

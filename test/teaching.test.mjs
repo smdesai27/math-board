@@ -155,3 +155,26 @@ test("board_read shows the learner's view only while a tab is open, and only wha
   assert.match(pointed, /pointing at: q \(until your next board_update\)/);
   assert.match(text(await handlers.board_read(ctx, {})), /focus \(you are pointing at\): q/);
 });
+
+test("a number out of range is brought into range, and the update's result says so", async (t) => {
+  const { board: b, warnings } = applyUpdateReport(emptyBoard(), {
+    equations: [{ op: "add", id: "big", latex: "x", size: 100 }],
+    scene: { mode: "append", shapes: [{ type: "text", id: "t", text: "hi", x: 0, y: 0, size: 500, opacity: 3 }], artifacts: [{ type: "plot", id: "p", x: 0, y: 0, width: 5000, height: 300, functions: [{ expr: "x" }] }] },
+  });
+  assert.equal(b.equations[0].size, 4);
+  assert.deepEqual(warnings, [
+    "equations[0]: size 100 is outside 0.3 to 4: 4 is used",
+    'scene.shapes[0] "t": size 500 is outside 8 to 200: 200 is used',
+    'scene.shapes[0] "t": opacity 3 is outside 0 to 1: 1 is used',
+    'scene.artifacts[0] "p": width 5000 is outside 80 to 1200: 1200 is used',
+  ]);
+  // In range: nothing to say. A save restored leniently says nothing either.
+  assert.deepEqual(applyUpdateReport(emptyBoard(), { equations: [{ op: "add", latex: "x", size: 2 }] }).warnings, []);
+  assert.deepEqual(applyUpdateReport(emptyBoard(), { equations: [{ op: "add", id: "e", latex: "x", size: 100 }] }, { strict: false }).warnings, []);
+  // The tutor reads it in the result of board_update.
+  const { ctx, text } = await board(t);
+  const out = text(await handlers.board_update(ctx, { equations: [{ op: "add", latex: "x", size: 100 }] }));
+  assert.match(out, /size 100 is outside 0\.3 to 4: 4 is used/);
+  // An id that is not on the board is quoted short.
+  assert.throws(() => applyUpdate(emptyBoard(), { focus: ["z".repeat(64)] }), (e) => e.message.length < 90);
+});

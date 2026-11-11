@@ -96,6 +96,12 @@ test("a covered item stays hidden until the learner clicks its cover; the tutor'
   await expect(page.locator('#overlay .cover[data-cover-for="last"]')).toHaveCount(1);
   server.update({ items: [{ op: "update", id: "last", fields: { cover: false } }] });
   await expect(page.locator("#overlay .cover")).toHaveCount(0);
+
+  // An id used again starts covered: the lifted cover belonged to the item that was deleted.
+  server.update({ equations: [{ op: "delete", id: "ans" }] });
+  await expect(page.locator('#blackboard g[data-id="ans"]')).toHaveCount(0);
+  server.update({ equations: [{ op: "add", id: "ans", latex: "p = mv", x: 100, y: 260, chapter: "c1", cover: true }] });
+  await expect(page.locator('#overlay .cover[data-cover-for="ans"]')).toHaveCount(1);
   await expect.poll(() => opacity(page, "last")).toBe(1);
 });
 

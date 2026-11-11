@@ -54,6 +54,10 @@
 - The MCP server ends the session on a request line beyond the SDK's 10 MiB buffer instead of staying alive without answering.
 - A saved port that can't be bound (in use, or privileged) no longer stops the board from starting.
 - A bar chart leaves room under negative bars for their value labels; a table cell too long for its column is cut with an ellipsis; an arrow from an item to itself is refused.
+- A number outside its range (a `size` of 100, an `opacity` of 3, a plot 5000 wide) is still brought into range, and the `board_update` result now says which value was used.
+- A cover lifted in a tab is forgotten when its item leaves the board, so an id used again (`eq2` after `eq2` was deleted) starts covered.
+- Math Board.app follows `board_open` while it runs: a board in another data folder, or one that came back with a new address, replaces the one on screen. An app started for one address also finds the default board when that address stops answering.
+- `board_open` says "already open" without naming a browser (the app or a terminal pane may be what shows it), and error messages quote an unknown id or chapter in short form.
 
 **Tools**
 

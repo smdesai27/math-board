@@ -877,7 +877,7 @@ export function openText({ url, port, opened, viewed, activationError, staleWarn
   const shown = opened
     ? `The board is open in the learner's browser (${where}).`
     : viewed
-      ? `The board is already open in a browser (${where}).`
+      ? `The board is already open (${where}).`
       : `Board: ${url} (not opened automatically; give the learner this URL).`;
   return [
     staleWarning,
@@ -1059,7 +1059,7 @@ export const handlers = Object.freeze({
     let region = params.region;
     if (!region && params.chapter) {
       const c = (board.chapters ?? []).find((ch) => ch.id === params.chapter);
-      if (!c) throw new Error(`unknown chapter "${params.chapter}"`);
+      if (!c) throw new Error(`unknown chapter "${String(params.chapter).slice(0, 64)}"`);
       region = chapterRegion(c);
     }
     // Region helpers are shared with /board export, so its PNGs match these snapshots.

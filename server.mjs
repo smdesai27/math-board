@@ -276,6 +276,16 @@ const show = (v) => {
   return s === undefined ? String(v) : s.length > 40 ? `${s.slice(0, 40)}…` : s;
 };
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+/**
+ * clamp for a number the tutor gave: while an update is applied (applyUpdateReport sets
+ * `limited`), a value that had to be brought into range is noted, and the result says so.
+ */
+let limited = null;
+const limit = (v, lo, hi, what) => {
+  const c = clamp(v, lo, hi);
+  if (c !== v && limited && limited.length < 8) limited.push(`${what} ${show(v)} is outside ${lo} to ${hi}: ${c} is used`);
+  return c;
+};
 /** Board coordinates are clamped to ±1e6; anything that is not a finite number becomes 0 (lenient). */
 const NUMBER = (v) => (typeof v === "number" && Number.isFinite(v) ? clamp(v, -1e6, 1e6) : 0);
 const COLOR = (v) => (typeof v === "string" && v.length <= 32 && !/[;{}<>]|url\s*\(/i.test(v) ? v : undefined);
@@ -315,6 +325,7 @@ function reader(raw, where, strict) {
     return undefined;
   };
   return {
+    where,
     has: (key) => raw[key] !== undefined,
     num(key, fallback) {
       const v = raw[key];
@@ -374,7 +385,7 @@ function readAnimation(r, out) {
   const reveal = r.oneOf("reveal", REVEALS);
   if (reveal) out.reveal = reveal;
   const duration = r.num("duration");
-  if (duration !== undefined) out.duration = clamp(Math.round(duration), 0, 10000);
+  if (duration !== undefined) out.duration = limit(Math.round(duration), 0, 10000, `${r.where}: duration`);
   const order = r.num("order");
   if (order !== undefined) out.order = order;
   return out;
@@ -392,8 +403,8 @@ export function sanitizeChapter(raw, { strict = false, where = "chapter" } = {})
     title: (r.str("title", 120) ?? "").replace(new RegExp(CONTROL, "g"), " "),
     x: r.num("x", 0),
     y: r.num("y", 0),
-    w: clamp(r.num("w", 0) || CHAPTER.w, 200, 20000),
-    h: clamp(r.num("h", 0) || CHAPTER.h, 150, 20000),
+    w: limit(r.num("w", 0) || CHAPTER.w, 200, 20000, `${where}: w`),
+    h: limit(r.num("h", 0) || CHAPTER.h, 150, 20000, `${where}: h`),
   };
   if (r.bool("frame") === false) out.frame = false;
   return out;
@@ -445,14 +456,14 @@ function equationOf(eq, { strict = false, keys: checkKeys = strict, where = "equ
   if (color) out.color = color;
   // Optional font scale relative to the default display size (1 = default).
   const size = r.num("size");
-  if (size !== undefined) out.size = clamp(size, 0.3, 4);
+  if (size !== undefined) out.size = limit(size, 0.3, 4, `${where}: size`);
   // Board-space placement; applyUpdate places an equation without x,y below the last one.
   const x = r.num("x");
   if (x !== undefined) out.x = x;
   const y = r.num("y");
   if (y !== undefined) out.y = y;
   const z = r.num("z");
-  if (z !== undefined) out.z = clamp(z, -1000, 1000);
+  if (z !== undefined) out.z = limit(z, -1000, 1000, `${where}: z`);
   const chapter = r.id("chapter");
   if (chapter) out.chapter = chapter;
   readAnimation(r, out);
@@ -656,7 +667,7 @@ function sanitizeTable(raw, r, where, strict) {
   const align = r.oneOf("align", ["left", "center", "right"]);
   if (align && align !== "center") out.align = align;
   const size = r.num("size");
-  if (size !== undefined) out.size = clamp(size, 10, 48);
+  if (size !== undefined) out.size = limit(size, 10, 48, `${where}: size`);
   if (raw.highlight !== undefined) {
     if (!Array.isArray(raw.highlight) || raw.highlight.length > 60) fail(`${where}: highlight must be a list of at most 60 of {row?, col?, color?}`);
     out.highlight = raw.highlight.map((h, i) => {
@@ -693,7 +704,7 @@ function sanitizeCode(raw, r, where, strict) {
   if (language) out.language = language;
   if (r.bool("lineNumbers") === false) out.lineNumbers = false;
   const size = r.num("size");
-  if (size !== undefined) out.size = clamp(size, 8, 40);
+  if (size !== undefined) out.size = limit(size, 8, 40, `${where}: size`);
   if (raw.highlight !== undefined) {
     const ok = Array.isArray(raw.highlight) && raw.highlight.length <= MAX_CODE_LINES && raw.highlight.every((n) => Number.isInteger(n) && n >= 1 && n <= lines.length);
     if (!ok) fail(`${where}: highlight must be a list of line numbers from 1 to ${lines.length}, got ${show(raw.highlight)}`);
@@ -817,8 +828,8 @@ export function sanitizeArtifact(raw, { strict = false, keys: checkKeys = strict
     id: r.id("id") ?? randomUUID(),
     x: r.num("x", 0),
     y: r.num("y", 0),
-    width: clamp(r.num("width", 0) || 360, 80, 1200),
-    height: clamp(r.num("height", 0) || 280, 60, 800),
+    width: limit(r.num("width", 0) || 360, 80, 1200, `${where}: width`),
+    height: limit(r.num("height", 0) || 280, 60, 800, `${where}: height`),
   };
   if (raw.type === "plot") Object.assign(out, sanitizePlot(raw, strict, where, out.height));
   else if (raw.type === "html") {
@@ -880,9 +891,9 @@ export function sanitizeArtifact(raw, { strict = false, keys: checkKeys = strict
   const label = r.str("label", 120);
   if (label !== undefined) out.label = label;
   const z = r.num("z");
-  if (z !== undefined) out.z = clamp(z, -1000, 1000);
+  if (z !== undefined) out.z = limit(z, -1000, 1000, `${where}: z`);
   const opacity = r.num("opacity");
-  if (opacity !== undefined) out.opacity = clamp(opacity, 0, 1);
+  if (opacity !== undefined) out.opacity = limit(opacity, 0, 1, `${where}: opacity`);
   const chapter = r.id("chapter");
   if (chapter) out.chapter = chapter;
   readAnimation(r, out);
@@ -920,13 +931,13 @@ function shapeOf(shape, { strict = false, keys: checkKeys = strict, where = "sha
     case "stroke":
       out.points = points(strict ? 2 : 1, MAX_POINTS_PER_STROKE);
       out.color = r.color("color") ?? CHALK;
-      out.width = clamp(r.num("width", 0) || 3, 0.5, 100);
+      out.width = limit(r.num("width", 0) || 3, 0.5, 100, `${where}: width`);
       break;
     case "line":
     case "arrow":
       out.points = points(2, type === "arrow" && strict ? 4 : 16);
       out.color = r.color("color") ?? CHALK;
-      out.width = clamp(r.num("width", 0) || 2, 0.5, 100);
+      out.width = limit(r.num("width", 0) || 2, 0.5, 100, `${where}: width`);
       break;
     case "rect":
     case "ellipse": {
@@ -945,7 +956,7 @@ function shapeOf(shape, { strict = false, keys: checkKeys = strict, where = "sha
       out.text = text;
       out.x = r.num("x", 0);
       out.y = r.num("y", 0);
-      out.size = clamp(r.num("size", 0) || 24, 8, 200);
+      out.size = limit(r.num("size", 0) || 24, 8, 200, `${where}: size`);
       out.color = r.color("color") ?? CHALK;
       const font = r.oneOf("font", ["serif", "sans", "mono"]);
       if (font) out.font = font;
@@ -959,12 +970,12 @@ function shapeOf(shape, { strict = false, keys: checkKeys = strict, where = "sha
   const label = r.str("label", 200);
   if (label !== undefined) out.label = label;
   const z = r.num("z");
-  if (z !== undefined) out.z = clamp(z, -1000, 1000);
+  if (z !== undefined) out.z = limit(z, -1000, 1000, `${where}: z`);
   const chapter = r.id("chapter");
   if (chapter) out.chapter = chapter;
   readAnimation(r, out);
   const opacity = r.num("opacity");
-  if (opacity !== undefined) out.opacity = clamp(opacity, 0, 1);
+  if (opacity !== undefined) out.opacity = limit(opacity, 0, 1, `${where}: opacity`);
   if (type !== "text") {
     const dash = r.dash("dash");
     if (dash) out.dash = dash;
@@ -1067,7 +1078,18 @@ export function legacyEquationPositions(equations) {
  * Returns { board, warnings, touched }: warnings found without a browser (overlapping chapters)
  * and the ids of the items and chapters the update added or changed.
  */
-export function applyUpdateReport(state, update, { strict = true, html = false, boxes = null } = {}) {
+export function applyUpdateReport(state, update, options = {}) {
+  // Numbers brought into range while the update is read (see `limit`) are warnings of its result.
+  const notes = (limited = options.strict === false ? null : []);
+  try {
+    const report = applyUpdateChecked(state, update, options);
+    if (notes?.length) report.warnings.push(...notes);
+    return report;
+  } finally {
+    limited = null;
+  }
+}
+function applyUpdateChecked(state, update, { strict = true, html = false, boxes = null } = {}) {
   if (!update || typeof update !== "object" || Array.isArray(update)) fail("update must be an object");
   for (const key of Object.keys(update)) if (!UPDATE_KEYS.has(key)) fail(`unknown update field: ${key}`);
   if (update.equations !== undefined && !Array.isArray(update.equations)) fail("equations must be an array");
@@ -1134,7 +1156,7 @@ export function applyUpdateReport(state, update, { strict = true, html = false, 
     const shape = !fresh && !eq && next.scene.shapes.find((s) => s.id === id);
     const artifact = !fresh && !eq && !shape && next.scene.artifacts.find((a) => a.id === id);
     const found = fresh ?? (eq ? { it: eq, kind: "equation" } : shape ? { it: shape, kind: "shape" } : artifact ? { it: artifact, kind: "artifact" } : null);
-    if (!found) fail(`${where}: ${field}: no item "${id}" on the board or earlier in this update`);
+    if (!found) fail(`${where}: ${field}: no item ${show(id)} on the board or earlier in this update`);
     return { ...((!fresh && boxes?.get(id)) || estimateBox(found.it, found.kind, originOf(found.it.chapter))), chapter: found.it.chapter };
   };
   const place = (raw, kind, where) => {
@@ -1185,14 +1207,14 @@ export function applyUpdateReport(state, update, { strict = true, html = false, 
         touched.add(eq.id);
       } else if (kind === "update") {
         const i = next.equations.findIndex((e) => e.id === op.id);
-        if (i === -1) fail(`${where}: unknown equation id: ${op.id}`);
+        if (i === -1) fail(`${where}: unknown equation id: ${show(op.id)}`);
         const { id: _id, ...changes } = fields;
         if (strict) onlyKeys(changes, EQUATION_KEYS, where);
         next.equations[i] = equationOf({ ...next.equations[i], ...changes, id: next.equations[i].id }, { strict, keys: false, where });
         touched.add(op.id);
       } else if (kind === "delete") {
         const i = next.equations.findIndex((e) => e.id === op.id);
-        if (i === -1) fail(`${where}: unknown equation id: ${op.id}`);
+        if (i === -1) fail(`${where}: unknown equation id: ${show(op.id)}`);
         next.equations.splice(i, 1);
       } else {
         fail(`${where}: invalid equation op: ${show(kind)} (add, update or delete)`);
@@ -1259,7 +1281,7 @@ export function applyUpdateReport(state, update, { strict = true, html = false, 
   if (update.focus !== undefined && update.focus !== null) {
     if (!Array.isArray(update.focus) || update.focus.length > 8 || !update.focus.every(VALID_ID)) fail("focus must be a list of at most 8 item ids");
     const ids = new Set(allItems.map((it) => it.id));
-    for (const id of update.focus) if (!ids.has(id)) fail(`focus: no item "${id}" on the board`);
+    for (const id of update.focus) if (!ids.has(id)) fail(`focus: no item ${show(id)} on the board`);
     if (update.focus.length) next.focus = [...new Set(update.focus)];
   }
 
@@ -2608,14 +2630,15 @@ export class BoardServer {
  * default browser. $MATH_BOARD_VIEWER decides otherwise: "browser" never uses the app, and a
  * path ending in .app names the app to use.
  */
+const APP_ID = "io.github.smdesai27.math-board"; // the app's bundle id (app/build.sh)
 export function viewerCommand(url, { plat = platform(), env = process.env, exists = existsSync, home = homedir() } = {}) {
   if (plat !== "darwin") return ["xdg-open", url];
   const wanted = env.MATH_BOARD_VIEWER;
   if (wanted === "browser") return ["open", url];
   const apps = wanted?.endsWith(".app") ? [wanted] : [path.join(home, "Applications", "Math Board.app"), "/Applications/Math Board.app"];
   const app = apps.find((a) => exists(path.join(a, "Contents", "MacOS", "MathBoard")));
-  // A running app keeps its window and ignores the arguments: it already shows this address,
-  // which a data folder keeps (token.json), and `open` brings it to the front.
+  // A running app keeps its window and never sees the arguments; `open` brings it to the front
+  // and it reads the address openBrowser left in its preferences.
   return app ? ["open", "-a", app, "--args", "--url", url] : ["open", url];
 }
 
@@ -2624,6 +2647,8 @@ export async function openBrowser(url) {
   const [cmd, ...args] = viewerCommand(url);
   try {
     const { execFile } = await import("node:child_process");
+    // For an app that already runs: the address goes where it looks when it is brought forward.
+    if (args[0] === "-a") await new Promise((resolve) => execFile("defaults", ["write", APP_ID, "lastURL", url], { timeout: 5000 }, () => resolve()));
     await new Promise((resolve, reject) => execFile(cmd, args, { timeout: 10000 }, (err) => (err ? reject(err) : resolve())));
     return true;
   } catch {
