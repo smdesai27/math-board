@@ -125,14 +125,15 @@ export const BOARD_DOCS = Object.freeze({
     "1. board_read: note the revision, the chapter list and the free space in the chapter you are teaching.",
     "2. board_update with baseRevision = that revision. Build the explanation in small updates, one idea per update: " +
       "each update that adds items is one lesson step, drawn live for the learner and replayable step by step.",
-    "3. The result gives the new revision (your next baseRevision) and a measured layout check: this update's warnings first, then a count of " +
+    "3. The result gives the new revision (your next baseRevision), what the update added or changed with each item's drawn box (measured, in the " +
+      "item's own coordinates: use it to place the next item beside or below), and a measured layout check: this update's warnings first, then a count of " +
       "older ones. Fix every warning (overlap, outside its chapter, failed to render) with items ops: {op:\"move\", id, dx, dy}, " +
       "{op:\"update\", id, fields:{...}} (type cannot change), {op:\"delete\", id}.",
     "Invalid input (an unknown field, a wrong type, an empty text, a bad id) is rejected with the reason and nothing is applied: fix it and resend.",
     "4. After significant changes call board_snapshot to see the board as the learner does (chapter or region to zoom in).",
     "Conflicts: a conflict means the board changed since your read (the learner loaded a save or cleared it, or another call landed). " +
       "Call board_read and re-apply your intended change against the current revision; never resend a stale replace or delete blindly.",
-    "Ids: items get random ids unless you pass a short id (1-64 characters) when adding them, e.g. \"eq1\", \"force\". " +
+    "Ids: an item added without an id gets a short one from its type (eq1, text2, arrow1, plot1); pass your own (1-64 characters) when a name says more, e.g. \"force\". " +
       "Ids are unique across shapes, artifacts and equations. Short ids make later edits and the learner's references (\"step 4, eq2\") easy.",
     "Order inside one update: title, clear ([\"equations\"|\"scene\"|\"all\"]; all also removes chapters), chapters, equations, scene, items, camera.",
     "check:false skips the layout check (faster for a burst of small edits; check again at the end).",
@@ -660,6 +661,64 @@ export function buildSchemas(Type) {
 /* Board summary for the model                                         */
 /* ------------------------------------------------------------------ */
 
+/** The items of a board, each marked with its kind (and an equation with where it sits). */
+function boardItems(board) {
+  const legacy = legacyEquationPositions(board?.equations);
+  return [
+    ...(board?.scene?.artifacts ?? []).map((it) => ({ ...it, _kind: "artifact" })),
+    ...(board?.equations ?? []).map((it) => ({ ...it, _kind: "equation", _at: legacy.get(it) ?? [it.x, it.y] })),
+    ...(board?.scene?.shapes ?? []).map((it) => ({ ...it, _kind: "shape" })),
+  ];
+}
+
+/** One item as a line of a layout listing: id, type, stored position and size, what it shows. */
+function itemLine(it, where = "", frameStates = {}) {
+  const r = (n) => (typeof n === "number" ? Math.round(n) : "?");
+  if (it._kind === "artifact")
+    return `  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.width)}x${r(it.height)}${it.label ? ` "${it.label}"` : ""}${it.source ? ` (${it.source.length} chars)` : ""}` +
+      `${it.params?.length ? ` sliders: ${it.params.map((p) => `${p.name}=${p.value} in [${p.min}, ${p.max}]`).join(", ")}` : ""}${it.libs?.length ? ` libs: ${it.libs.join(", ")}` : ""}${where}` +
+      `${frameStates[it.id]?.state === "checking" ? " [checking]" : frameStates[it.id]?.state === "failed" ? ` [${frameStates[it.id].reason}]` : ""}`;
+  if (it._kind === "equation") return `  [${it.id}] equation at (${r(it._at[0])},${r(it._at[1])}) ${it.label ? `${it.label}: ` : ""}${String(it.latex).slice(0, 80)}${where}`;
+  if (it.points?.length) {
+    const xs = it.points.map((p) => p[0]), ys = it.points.map((p) => p[1]);
+    return `  [${it.id}] ${it.type} bbox (${r(Math.min(...xs))},${r(Math.min(...ys))})-(${r(Math.max(...xs))},${r(Math.max(...ys))})${where}`;
+  }
+  if (it.type === "text") return `  [${it.id}] text at (${r(it.x)},${r(it.y)}) "${String(it.text).slice(0, 40)}"${where}`;
+  return `  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.w)}x${r(it.h)}${where}`;
+}
+
+const MAX_LISTED_CHANGES = 40;
+
+/**
+ * What one update changed, for its result: a line per item it added or changed, with the box the
+ * layout check measured for it (in its chapter's coordinates, like the item's own x,y), the ids it
+ * removed, and one line on where the board stands. The whole layout stays a board_read away, so a
+ * long lesson does not repeat its chapter in every result.
+ */
+export function summarizeChange(board, touched, removed = [], measured = [], frameStates = {}) {
+  const chapters = new Map((board?.chapters ?? []).map((c) => [c.id, c]));
+  const items = new Map(boardItems(board).map((it) => [it.id, it]));
+  const boxes = new Map(measured.map((m) => [m.id, m]));
+  const lines = [];
+  for (const id of touched) {
+    const it = items.get(id), c = chapters.get(id);
+    if (it) {
+      const origin = chapters.get(it.chapter) ?? { x: 0, y: 0 };
+      const m = boxes.get(id);
+      lines.push(itemLine(it, (it.chapter ? ` {${it.chapter}}` : "") + (it.step ? ` s${it.step}` : ""), frameStates) + (m ? ` · drawn box ${m.x - Math.round(origin.x)},${m.y - Math.round(origin.y)} ${m.w}x${m.h}` : ""));
+    } else if (c) lines.push(`  [${c.id}] chapter "${c.title}" at (${Math.round(c.x)},${Math.round(c.y)}) ${Math.round(c.w)}x${Math.round(c.h)}`);
+  }
+  const cam = board?.camera;
+  const out = [];
+  if (lines.length) out.push(`added or changed (${lines.length}):`, ...lines.slice(0, MAX_LISTED_CHANGES), ...(lines.length > MAX_LISTED_CHANGES ? [`  ... ${lines.length - MAX_LISTED_CHANGES} more`] : []));
+  if (removed.length) out.push(`removed (${removed.length}): ${removed.slice(0, MAX_LISTED_CHANGES).join(", ")}${removed.length > MAX_LISTED_CHANGES ? ", ..." : ""}`);
+  out.push(
+    `board: ${chapters.size} chapter${chapters.size === 1 ? "" : "s"}, ${items.size} item${items.size === 1 ? "" : "s"}` +
+      `${board?.lastStep ? `, ${board.lastStep} step${board.lastStep === 1 ? "" : "s"}` : ""}, camera: ${cam ? (cam.chapter ? `chapter ${cam.chapter}` : "a rect") : "home"}. board_read lists the whole layout.`,
+  );
+  return out.join("\n");
+}
+
 /**
  * Text summary for the model. With chapters, prints a table of contents and
  * the detailed layout of one chapter only (focus; default = camera chapter),
@@ -671,12 +730,7 @@ export function buildSchemas(Type) {
  */
 export function summarizeBoard(board, focus, frameStates = {}) {
   const chapters = board?.chapters ?? [];
-  const legacy = legacyEquationPositions(board?.equations);
-  const all = [
-    ...(board?.scene?.artifacts ?? []).map((it) => ({ ...it, _kind: "artifact" })),
-    ...(board?.equations ?? []).map((it) => ({ ...it, _kind: "equation", _at: legacy.get(it) ?? [it.x, it.y] })),
-    ...(board?.scene?.shapes ?? []).map((it) => ({ ...it, _kind: "shape" })),
-  ];
+  const all = boardItems(board);
   const camChapter = board?.camera?.chapter;
   const f = focus ?? (chapters.length ? camChapter ?? chapters[chapters.length - 1]?.id : "all");
   const lines = [`title: ${board?.title ?? ""}`];
@@ -693,22 +747,7 @@ export function summarizeBoard(board, focus, frameStates = {}) {
   if (board?.lastStep) lines.push(`steps: ${board.lastStep} (the next board_update adds step ${board.lastStep + 1})`);
   lines.push(`camera: ${cam ? (cam.chapter ? `chapter ${cam.chapter}` : `rect ${Math.round(cam.x)},${Math.round(cam.y)} ${Math.round(cam.w)}x${Math.round(cam.h)}`) : `home (0,0 ${CHAPTER.w}x${CHAPTER.h})`}`);
   const shown = f === "all" ? all : all.filter((it) => (it.chapter ?? null) === (f === "free" ? null : f));
-  const r = (n) => (typeof n === "number" ? Math.round(n) : "?");
-  const items = [];
-  for (const it of shown) {
-    const where = (it.chapter && f === "all" ? ` {${it.chapter}}` : "") + (it.step ? ` s${it.step}` : "");
-    if (it._kind === "artifact")
-      items.push(`  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.width)}x${r(it.height)}${it.label ? ` "${it.label}"` : ""}${it.source ? ` (${it.source.length} chars)` : ""}` +
-        `${it.params?.length ? ` sliders: ${it.params.map((p) => `${p.name}=${p.value} in [${p.min}, ${p.max}]`).join(", ")}` : ""}${it.libs?.length ? ` libs: ${it.libs.join(", ")}` : ""}${where}` +
-        `${frameStates[it.id]?.state === "checking" ? " [checking]" : frameStates[it.id]?.state === "failed" ? ` [${frameStates[it.id].reason}]` : ""}`);
-    else if (it._kind === "equation")
-      items.push(`  [${it.id}] equation at (${r(it._at[0])},${r(it._at[1])}) ${it.label ? `${it.label}: ` : ""}${String(it.latex).slice(0, 80)}${where}`);
-    else if (it.points?.length) {
-      const xs = it.points.map((p) => p[0]), ys = it.points.map((p) => p[1]);
-      items.push(`  [${it.id}] ${it.type} bbox (${r(Math.min(...xs))},${r(Math.min(...ys))})-(${r(Math.max(...xs))},${r(Math.max(...ys))})${where}`);
-    } else if (it.type === "text") items.push(`  [${it.id}] text at (${r(it.x)},${r(it.y)}) "${String(it.text).slice(0, 40)}"${where}`);
-    else items.push(`  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.w)}x${r(it.h)}${where}`);
-  }
+  const items = shown.map((it) => itemLine(it, (it.chapter && f === "all" ? ` {${it.chapter}}` : "") + (it.step ? ` s${it.step}` : ""), frameStates));
   const scope = f === "all" ? "whole board" : f === "free" ? "free items" : `chapter ${f}`;
   lines.push(`layout of ${scope} (${shown.length} items${chapters.length && f !== "all" ? "; pass chapter to board_read for another" : ""}):`);
   lines.push(...items.slice(0, 200));
@@ -863,6 +902,7 @@ export const handlers = Object.freeze({
     const { baseRevision, check, ...update } = params;
     let result;
     const before = s.revision;
+    const idsBefore = boardItems(s.board).map((it) => it.id);
     try {
       result = s.apply({ baseRevision, ...update });
     } catch (err) {
@@ -886,11 +926,16 @@ export const handlers = Object.freeze({
     const board = s.getState();
     // Write the autosave now, so a failure is reported with this update.
     await s.flushAutosave().catch(() => {});
+    const idsAfter = new Set(boardItems(board).map((it) => it.id));
+    const removed = idsBefore.filter((id) => !idsAfter.has(id));
     let layout = warnings.length ? updateWarnings(warnings, [], touched) : "";
+    let measured = [];
     if (check !== false) {
       try {
         const lint = await s.snapshots.lint({ signal: ctx.signal });
         layout = updateWarnings(warnings, lint.issues, touched);
+        // The boxes are of the board as it is now; they belong in this result only if no later update has landed.
+        if (s.revision === revision) measured = lint.items ?? [];
       } catch (e) {
         layout = [layout, e?.name === "AbortError" ? "layout check cancelled." : `layout check unavailable: ${String(e.message).split("\n")[0]}`].filter(Boolean).join("\n");
       }
@@ -906,7 +951,7 @@ export const handlers = Object.freeze({
             layout,
             checkingLine(s),
             ...snapshotNotes(s),
-            summarizeBoard(board, undefined, frameStatesOf(s)),
+            summarizeChange(board, touched, removed, measured, frameStatesOf(s)),
             viewerLine(ctx, s),
           ]
             .filter(Boolean)

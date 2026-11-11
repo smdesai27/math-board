@@ -389,6 +389,15 @@ export class Snapshotter {
     }
   }
 
+  /**
+   * Start the headless browser now, in the background, so the first layout check does not wait
+   * for it (board_open calls this). Failing is fine: the first real call reports why.
+   */
+  warm() {
+    if (this.live || this.launching) return;
+    this.run(() => this.ensurePage(), { timeout: LINT_TIMEOUT_MS, label: "headless browser start" }).catch(() => {});
+  }
+
   /** Close the browser but keep working: the next call launches a new one. */
   discard() {
     const browser = this.browser;

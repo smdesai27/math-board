@@ -201,7 +201,7 @@ export default async function mathBoardExtension(pi: ExtensionAPI) {
    * opened again.
    */
   async function openBoard(ctx: ExtensionContext, { unlessViewed = false } = {}) {
-    const status = await link.status();
+    const status = await link.status({ warm: true });
     const activationError = activateBoardTools();
     const viewed = unlessViewed && status.viewers > 0;
     const opened = ctx.mode === "tui" && !viewed && !noBrowser() ? await openBrowser(link.url) : false;

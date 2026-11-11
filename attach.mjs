@@ -160,9 +160,9 @@ export class BoardLink {
     );
   }
 
-  /** See BoardServer#status. */
-  status() {
-    return this.on((s) => s.status(), () => this.request("/api/status"));
+  /** See BoardServer#status. `warm` also starts the headless browser, so the first layout check is quick. */
+  status({ warm = false } = {}) {
+    return this.on((s) => (warm && s.snapshots.warm(), s.status()), () => this.request(`/api/status${warm ? "?warm=1" : ""}`));
   }
   async state() {
     return this.on((s) => ({ revision: s.revision, board: s.getState() }), async () => { const d = await this.request("/api/state"); return { revision: d.revision, board: d.board }; });

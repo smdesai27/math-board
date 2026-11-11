@@ -29,6 +29,9 @@
 
 **Tools**
 
+- A `board_update` result lists what the update added or changed, each with the box the layout check measured for it, the ids it removed, and one line on the board, instead of repeating the whole chapter every time. On a 28-update lesson that is 15,652 characters of results instead of 41,068, and a result no longer grows with the lesson. `board_read` still gives the whole layout.
+- An item added without an id gets a short one from its type (`eq1`, `text2`, `arrow1`, `plot1`) instead of a UUID.
+- `board_open` starts the headless browser in the background, so the first layout check doesn't wait for it.
 - `board_snapshot` lists the measured boxes of the items in the region it shows (a chapter, a region, the camera view), not every item on the board, and says how many are elsewhere.
 
 ## 0.3.1 (2026-10-30)

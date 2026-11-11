@@ -191,3 +191,21 @@ test("a page that cannot load the board is closed, not left open", async () => {
   assert.equal(made.isClosed(), true);
   await snaps.close();
 });
+
+test("warm starts the headless page once, in the background, and stays quiet when there is no browser", async () => {
+  const chromium = fakeChromium();
+  const snaps = new Snapshotter(server, { chromium });
+  snaps.warm();
+  snaps.warm();
+  await snaps.queue;
+  assert.equal(chromium.launches.length, 1);
+  assert.equal(snaps.live, true);
+  snaps.warm();
+  assert.deepEqual((await snaps.lint()).issues, ["lint ok"]);
+  assert.equal(chromium.browsers[0].pages.length, 1, "the first layout check uses the warm page");
+  await snaps.close();
+  const none = new Snapshotter(server, { chromium: { launch: async () => { throw new Error("Executable doesn't exist"); } } });
+  none.warm();
+  await none.queue; // no unhandled rejection
+  await assert.rejects(none.lint(), /no headless browser available/);
+});

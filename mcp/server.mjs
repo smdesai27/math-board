@@ -91,7 +91,7 @@ const link = new BoardLink({ dataDir: defaultDataDir(), context: { staleWarning,
  * shows it. The URL (with its token) goes into the result only when no browser shows the board.
  */
 async function boardOpen() {
-  const { viewers, notices } = await link.status();
+  const { viewers, notices } = await link.status({ warm: true });
   const viewed = viewers > 0;
   const opened = process.env.MATH_BOARD_NO_BROWSER === "1" || viewed ? false : await openBrowser(link.url);
   return {

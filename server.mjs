@@ -868,11 +868,30 @@ export function applyUpdateReport(state, update, { strict = true, html = false }
 
   if (update.chapters !== undefined) applyChapterOps(next, update.chapters, strict, touched);
 
+  // An item added without an id gets a short one from its type (eq1, text2, plot1): the tutor
+  // reads it back and the learner says it ("step 4, eq2"), so it should not be a UUID.
+  let usedIds = null;
+  const shortId = (prefix) => {
+    usedIds ??= new Set([
+      ...[...next.equations, ...next.scene.shapes, ...next.scene.artifacts].map((it) => it.id),
+      ...[...(Array.isArray(update.equations) ? update.equations : []), ...(Array.isArray(update.scene?.shapes) ? update.scene.shapes : []), ...(Array.isArray(update.scene?.artifacts) ? update.scene.artifacts : [])].map((it) => it?.id),
+    ]);
+    for (let n = 1; ; n++) {
+      const id = `${prefix}${n}`;
+      if (!usedIds.has(id)) {
+        usedIds.add(id);
+        return id;
+      }
+    }
+  };
+  const named = (raw) => (strict && raw && typeof raw === "object" && !Array.isArray(raw) && raw.id === undefined && /^[a-z]{1,12}$/.test(raw.type ?? "") ? { ...raw, id: shortId(raw.type) } : raw);
+
   if (Array.isArray(update.equations)) {
     update.equations.forEach((op, i) => {
       const where = `equations[${i}]`;
       if (!op || typeof op !== "object") fail(`${where}: invalid equation op`);
       const { op: kind, ...fields } = op;
+      if (kind === "add" && strict && fields.id === undefined) fields.id = shortId("eq");
       if (kind === "add") {
         const eq = equationOf(fields, { strict, where });
         if (next.equations.length >= MAX_EQUATIONS) fail(`too many equations (max ${MAX_EQUATIONS})`);
@@ -906,8 +925,8 @@ export function applyUpdateReport(state, update, { strict = true, html = false }
     if (!Array.isArray(rawShapes) || !Array.isArray(rawArtifacts)) fail("scene.shapes and scene.artifacts must be arrays");
     if (strict && rawShapes.length > MAX_SHAPES_PER_UPDATE) fail(`too many shapes in one update (max ${MAX_SHAPES_PER_UPDATE})`);
     if (strict && rawArtifacts.length > MAX_ARTIFACTS_PER_UPDATE) fail(`too many artifacts in one update (max ${MAX_ARTIFACTS_PER_UPDATE})`);
-    const shapes = rawShapes.map((s, i) => shapeOf(s, { strict, where: `scene.shapes[${i}]${s?.id ? ` "${String(s.id).slice(0, 64)}"` : ""}` }));
-    const artifacts = rawArtifacts.map((a, i) => sanitizeArtifact(a, { strict, html, where: `scene.artifacts[${i}]${a?.id ? ` "${String(a.id).slice(0, 64)}"` : ""}` }));
+    const shapes = rawShapes.map((s, i) => shapeOf(named(s), { strict, where: `scene.shapes[${i}]${s?.id ? ` "${String(s.id).slice(0, 64)}"` : ""}` }));
+    const artifacts = rawArtifacts.map((a, i) => sanitizeArtifact(named(a), { strict, html, where: `scene.artifacts[${i}]${a?.id ? ` "${String(a.id).slice(0, 64)}"` : ""}` }));
     for (const it of [...shapes, ...artifacts]) touched.add(it.id);
     if (mode === "replace") next.scene = { shapes, artifacts };
     else next.scene = { shapes: [...next.scene.shapes, ...shapes], artifacts: [...next.scene.artifacts, ...artifacts] };
@@ -1891,7 +1910,10 @@ export class BoardServer {
         return this.json(res, 200, { ok: true, revision: this.revision, board: this.board, ...this.frames(snapshot) });
       }
       if (req.method === "GET" && pathname === "/api/saves") return this.json(res, 200, { ok: true, saves: await this.listSaves() });
-      if (req.method === "GET" && pathname === "/api/status") return this.json(res, 200, { ok: true, ...this.status() });
+      if (req.method === "GET" && pathname === "/api/status") {
+        if (url.searchParams.get("warm") === "1") this.snapshots.warm(); // a joined session's board_open
+        return this.json(res, 200, { ok: true, ...this.status() });
+      }
 
       if (req.method === "POST") {
         const limit = pathname === "/api/tool" ? MAX_TOOL_BODY_BYTES : MAX_BODY_BYTES;
