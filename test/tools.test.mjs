@@ -121,3 +121,40 @@ test("board_snapshot lists the measured boxes of the region it shows, not the wh
   const empty = text(await handlers.board_snapshot(ctx, { region: { x: 5000, y: 5000, w: 600, h: 400 } }));
   assert.match(empty, /nothing in this region \(4 items elsewhere on the board\)\./);
 });
+
+test("parallel updates: each result describes the revision it names", async (t) => {
+  const { ctx, text } = await setup(t);
+  const add = (id) => handlers.board_update(ctx, { equations: [{ op: "add", id, latex: "x" }], check: false });
+  const [a, b] = (await Promise.all([add("first"), add("second")])).map(text);
+  assert.match(a, /revision 1 \(was 0\)/);
+  assert.doesNotMatch(a, /\[second\]/, "the first result does not list what the second call added");
+  assert.match(b, /revision 2 \(was 1\)[\s\S]*\[second\]/);
+  assert.doesNotMatch(b, /\[first\]/, "a result lists what its update changed, not the whole chapter");
+});
+
+test("an update's result lists what it changed with the measured boxes, not the whole chapter", async (t) => {
+  const boxes = [
+    { id: "eq1", kind: "equation", chapter: "c", x: 2088, y: 192, w: 120, h: 40 },
+    { id: "text1", kind: "text", chapter: "c", x: 2500, y: 378, w: 60, h: 28 },
+    { id: "old", kind: "text", chapter: "c", x: 2100, y: 600, w: 60, h: 28 },
+  ];
+  const { s, ctx, text } = await setup(t, { lint: async () => ({ items: boxes, issues: [] }) });
+  s.update({ chapters: [{ op: "add", id: "c", title: "C", x: 2000, y: 100 }], scene: { mode: "append", shapes: [{ type: "text", id: "old", text: "before", x: 100, y: 520, chapter: "c" }, { type: "rect", id: "gone", x: 1, y: 1, w: 5, h: 5 }] } });
+  const out = text(await handlers.board_update(ctx, {
+    baseRevision: 1,
+    equations: [{ op: "add", latex: "E = mc^2", chapter: "c" }],
+    scene: { mode: "append", shapes: [{ type: "text", text: "rest energy", x: 500, y: 300, chapter: "c" }] },
+    items: [{ op: "delete", id: "gone" }],
+  }));
+  // Items without an id get a short one from their type; the drawn box is in the chapter's coordinates.
+  assert.match(out, /added or changed \(2\):\n {2}\[eq1\] equation at \(88,92\) E = mc\^2 \{c\} s2 · drawn box 88,92 120x40\n {2}\[text1\] text at \(500,300\) "rest energy" \{c\} s2 · drawn box 500,278 60x28\n/);
+  assert.match(out, /removed \(1\): gone\n/);
+  assert.match(out, /board: 1 chapter, 3 items, 2 steps, camera: home\. board_read lists the whole layout\./);
+  assert.doesNotMatch(out, /\[old\]/);
+  // Without a layout check there are no boxes, and the stored positions stand alone.
+  const quick = text(await handlers.board_update(ctx, { baseRevision: 2, scene: { mode: "append", artifacts: [{ type: "plot", functions: [{ expr: "x" }], x: 600, y: 400, chapter: "c" }] }, check: false }));
+  assert.match(quick, /\[plot1\] plot at \(600,400\) 360x280 \{c\} s3\n/);
+  // Short ids skip the ones in use, on the board and in the same update.
+  s.update({ equations: [{ op: "add", id: "eq3", latex: "a" }, { op: "add", latex: "b" }, { op: "add", latex: "c" }] });
+  assert.deepEqual(s.getState().equations.map((e) => e.id), ["eq1", "eq3", "eq2", "eq4"]);
+});

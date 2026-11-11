@@ -257,7 +257,8 @@ test("hovering an item shows its step, id and chapter; never during a drag", asy
   expect(errors).toEqual([]);
 });
 
-test("clicking an item copies its reference with a toast; double-click still follows", async ({ page, context }) => {
+test("clicking an item copies its reference with a toast; double-click still follows", async ({ page, context, browserName }) => {
+  test.skip(browserName === "webkit", "Playwright's WebKit can't grant clipboard permissions, so the clipboard can't be read back");
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(server.url).origin });
@@ -350,6 +351,21 @@ test("declining the second Clear question keeps the board, and later updates sti
   await expect(page.locator("#board-title")).toHaveText("Still live");
 });
 
+test("New board saves the lesson under its title and date, then starts empty", async ({ page }) => {
+  await ready(page);
+  server.update({ title: "To keep", equations: [{ op: "add", id: "a", latex: "a = 1", x: 100, y: 100 }] });
+  await expect(page.locator("#board-title")).toHaveText("To keep");
+  let asked = "";
+  page.once("dialog", (d) => { asked = d.message(); d.accept(); });
+  await menuClick(page, "#btn-new");
+  const name = `to-keep-${new Date().toLocaleDateString("sv")}`;
+  await expect(page.locator("#conn")).toHaveText(`Saved as ${name} · new board`);
+  expect(asked).toMatch(/saved first/);
+  await expect(page.locator("#blackboard .katex")).toHaveCount(0);
+  expect(await server.listSaves()).toEqual([name]);
+  expect(server.getState().equations).toEqual([]);
+});
+
 test("Save writes the board the learner sees and says so", async ({ page }) => {
   await ready(page);
   server.update({ title: "To keep", equations: [{ op: "add", id: "a", latex: "a = 1", x: 100, y: 100 }] });
@@ -386,6 +402,38 @@ test("a stopped board server is reported after a sustained outage; the tab recon
   await expect(page.locator("#conn")).toHaveText(`Connected · revision ${server.revision}`);
   server.update({ baseRevision: server.revision, title: "And after" });
   await expect(page.locator("#board-title")).toHaveText("And after");
+});
+
+test("after a lost connection the page sends its token only to the board, not to another program on the port", async ({ page }) => {
+  await page.clock.install();
+  await ready(page);
+  const http = server.server, port = server.port;
+  await new Promise((resolve) => { http.close(resolve); http.closeAllConnections(); });
+  await expect(page.locator("#conn")).toHaveText("Connection lost · reconnecting…");
+  // Another program takes the port and answers everything, ping included, as well as it can.
+  const { createServer } = await import("node:http");
+  const seen = [];
+  const impostor = createServer((req, res) => {
+    seen.push(`${req.url} ${req.headers.authorization ?? ""}`);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, name: "math-board", proof: "0".repeat(64) }));
+  });
+  await new Promise((resolve) => impostor.listen(port, "127.0.0.1", resolve));
+  try {
+    for (let i = 0; i < 6; i++) {
+      await page.clock.fastForward(5000);
+      await page.waitForTimeout(100);
+    }
+    await expect.poll(() => seen.filter((line) => line.startsWith("/api/ping?n=")).length).toBeGreaterThan(1);
+    expect(seen.filter((line) => line.includes(server.token))).toEqual([]);
+    await expect(page.locator("#conn")).toHaveText("Board server stopped");
+  } finally {
+    await new Promise((resolve) => { impostor.close(resolve); impostor.closeAllConnections(); });
+  }
+  // The board comes back: the page recognises it and reconnects.
+  await new Promise((resolve) => http.listen(port, "127.0.0.1", resolve));
+  await page.clock.fastForward(6000);
+  await expect(page.locator("#conn")).toHaveText(`Connected · revision ${server.revision}`);
 });
 
 /** Serve the page a board whose equations are `equations()` (the real server's revision and the rest of its state). */

@@ -8,8 +8,62 @@
 - Sliders on plots: `params` (up to six, with `min`, `max`, `value`, `step`, `label`, `period`) add slider rows the learner drags or plays, and every expression, point, line and area end of the plot can use them. A point with `drag: true` moves the slider it is bound to. `board_read` lists sliders, and a copied reference includes the learner's values. The teaching text suggests a slider when the lesson is how something changes with a parameter.
 - html artifacts, off unless `MATH_BOARD_HTML=1`: the model's own HTML and JavaScript in a sandboxed frame (opaque origin, its own policy blocking network requests, WebRTC removed, no navigation), with bundled three.js (and OrbitControls), d3, matter.js, lil-gui, fft.js and KaTeX loaded on request. Frames sit in a layer that follows pan, zoom, steps and fades (Safari can't place a frame inside the SVG), load when their chapter comes near the screen, and report ready or their errors, with the source line, to the layout check. Each new frame is loaded in the headless check first, one at a time (a layout check goes through every frame its update added); one that isn't ready within 8 s (an endless loop) or crashes the page is never sent to the learner's browser, and the tool result and `board_read` say so. Frames may not write the clipboard. `&html=off` in the board's address loads no frame in that tab. `board_docs html` documents it, and `/board status` shows whether it's on.
 
+**One shared board**
+
+- Every session on a data folder draws on one board: the first one hosts it, the others join and their tool calls run in the host. When the host ends, the next call from another session hosts the board again from the autosave. pi and the MCP server no longer keep separate boards; the MCP server's old `mcp/` saves are copied over as `mcp-<name>`.
+- A data folder keeps its port and token in `token.json`, and the autosave restores the revision, so the board's address and the tutor's `baseRevision` survive a restart. `MATH_BOARD_PORT` asks for a fixed port.
+- `pi-math-board serve` hosts the board with no agent attached.
+- New board (the page's ⋯ menu, or `/board new`): saves the lesson under its title and today's date, then starts an empty board. The teaching text tells the tutor that the learner decides when a new board starts.
+- `/board status` says when another session hosts the board; `/board stop` then leaves it running.
+- A board proves itself before anything is sent to it: joining sessions, the page after a lost connection and the Mac app ask `/api/ping` a random question that only the board can answer (a key derived from the token, kept in `board.lock`). If another program holds the board's saved port, the board starts on a new port with a new token.
+
+**Viewers**
+
+- Math Board.app (macOS): the board in a window of its own. `npm run build:app -- --install` builds it with `swiftc`; once installed, `board_open` opens the board there (`MATH_BOARD_VIEWER=browser` keeps the browser).
+- `pi-math-board watch`: the board in a terminal pane as sixel graphics, redrawn on every change (tmux 3.4+ with sixel, WezTerm, iTerm2, foot).
+- In a small window the bar shrinks and fades; the tab's title is the lesson's.
+
+**New things to draw**
+
+- `table`: rows of text, numbers or math cells (`$…$`), a header row, highlighted rows, columns or cells.
+- `code`: a monospace listing with line numbers and highlighted lines.
+- `chart`: bar charts and histograms.
+- Plots take `vectors` and `segments` in their own coordinates; their ends can follow sliders.
+- `image`: a PNG, JPEG, GIF or WebP from the learner's disk, copied into the data folder. Only from the learning folder unless `MATH_BOARD_IMAGE_DIRS` allows more.
+- `board_docs` has a topic for each.
+
+**Teaching**
+
+- `focus: [ids]` in `board_update` points at items: a ring around each and the rest of the board dimmed, until the next update. Nothing is drawn.
+- `below` and `rightOf` place an equation, text, rect, ellipse or artifact next to another item, from the box the layout check measured for it, and store plain `x,y`. An arrow takes `from` and `to` item ids.
+- `cover: true` hides an item behind a panel until the learner clicks it.
+- `board_read` ends with what the learner's tab shows: the chapter in view, whether they stepped back, slider values, the item last clicked and the covers lifted. The tab reports it; it never changes the board or starts a model turn.
+
+**Fixes**
+
+- A request the server could not handle (say, a `saves` that is a file) gets an error answer instead of hanging.
+- A board that shared its data folder with a second one writes its `board.lock` again after the second one stops, so a third still gets the warning.
+- Stopping the board during a layout check no longer starts a second headless browser, and a headless page that could not load the board is closed.
+- With two updates in flight, each `board_update` result describes the revision it names.
+- The page notices a connection that died without an error (the server's pings are events now, and 70 s without one reconnects), and a failed read after a change is tried again instead of leaving an older board on screen.
+- Moving or restyling a plot keeps the slider values the learner set; only a change to its sliders resets them.
+- The hover reference is not recomputed on every frame of a pan or zoom; it comes back when the view rests.
+- The browser tests run in WebKit as well as Chromium.
+- Ids and titles are stored without control characters.
+- Ctrl-C stops the board cleanly once the headless browser has started (it used to exit with 130 and leave `board.lock`).
+- The MCP server ends the session on a request line beyond the SDK's 10 MiB buffer instead of staying alive without answering.
+- A saved port that can't be bound (in use, or privileged) no longer stops the board from starting.
+- A bar chart leaves room under negative bars for their value labels; a table cell too long for its column is cut with an ellipsis; an arrow from an item to itself is refused.
+- A number outside its range (a `size` of 100, an `opacity` of 3, a plot 5000 wide) is still brought into range, and the `board_update` result now says which value was used.
+- A cover lifted in a tab is forgotten when its item leaves the board, so an id used again (`eq2` after `eq2` was deleted) starts covered.
+- Math Board.app follows `board_open` while it runs: a board in another data folder, or one that came back with a new address, replaces the one on screen. An app started for one address also finds the default board when that address stops answering.
+- `board_open` says "already open" without naming a browser (the app or a terminal pane may be what shows it), and error messages quote an unknown id or chapter in short form.
+
 **Tools**
 
+- A `board_update` result lists what the update added or changed, each with the box the layout check measured for it, the ids it removed, and one line on the board, instead of repeating the whole chapter every time. On a 28-update lesson that is 15,652 characters of results instead of 41,068, and a result no longer grows with the lesson. `board_read` still gives the whole layout.
+- An item added without an id gets a short one from its type (`eq1`, `text2`, `arrow1`, `plot1`) instead of a UUID.
+- `board_open` starts the headless browser in the background, so the first layout check doesn't wait for it.
 - `board_snapshot` lists the measured boxes of the items in the region it shows (a chapter, a region, the camera view), not every item on the board, and says how many are elsewhere.
 
 ## 0.3.1 (2026-10-30)

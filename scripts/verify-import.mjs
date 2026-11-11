@@ -37,7 +37,8 @@ assert.deepEqual(await completions("ex"), ["export"]);
 assert.ok(![...ext.tools.keys()].some((name) => /export/.test(name)));
 const def = (name) => ext.tools.get(name).definition;
 // Per-turn cost budgets in characters (description + JSON schema); README quotes the measured numbers.
-const BUDGET = { board_open: 1000, board_update: 9600, total: 12800 };
+// board_update grew by about 800 characters for focus, cover, below/rightOf and arrows between items.
+const BUDGET = { board_open: 1000, board_update: 10200, total: 13200 };
 // index.ts stamps its imports with the same file list the server watches.
 const serverModule = await import(pathToFileURL(path.join(root, "server.mjs")).href);
 const indexFiles = JSON.parse(readFileSync(path.join(root, "index.ts"), "utf8").match(/const SERVER_FILES = (\[[^\]]*\])/)[1]);
@@ -88,7 +89,7 @@ const tool = (name) => def(name);
 
 // board_docs: every topic returns reference text without starting the server.
 const topics = def("board_docs").parameters.properties.topic.enum;
-assert.deepEqual(topics, ["overview", "workflow", "chapters", "equations", "marks", "plot", "svg", "mermaid", "molecule", "icon", "html", "animation", "layout", "saves"]);
+assert.deepEqual(topics, ["overview", "workflow", "chapters", "equations", "marks", "plot", "svg", "mermaid", "molecule", "icon", "table", "code", "chart", "image", "html", "animation", "layout", "saves"]);
 for (const topic of topics) {
   const r = await tool("board_docs").execute(`docs-${topic}`, { topic }, undefined, undefined, ctx);
   assert.equal(r.content[0].type, "text");
@@ -110,7 +111,7 @@ const startRun = async (cwd) => {
 const teaching = (await startRun(path.join(learnDir, "linear-algebra"))).sections.board_teaching;
 assert.equal(typeof teaching, "string");
 const words = teaching.split(/\s+/).filter(Boolean).length;
-assert.ok(words >= 150 && words <= 220, `board_teaching has ${words} words`);
+assert.ok(words >= 150 && words <= 260, `board_teaching has ${words} words`);
 for (const name of ["board_open", "board_read", "board_update", "board_docs"]) assert.ok(teaching.includes(name), name);
 assert.doesNotMatch(teaching, /\d{1,2}:\d{2}|\/Users\/|\/Volumes\/|~\//); // no clock times or paths
 assert.equal((await startRun(learnDir)).sections.board_teaching, teaching); // the folder itself; same text again

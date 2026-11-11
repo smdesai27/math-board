@@ -10,9 +10,17 @@ Nearly every tool I looked at that lets an agent draw also lets the human draw b
 
 It also keeps the roles clear. The conversation and the learner's answers stay in the terminal. The board is the professor's blackboard, not a shared notebook.
 
-What I can do on the page: pan, zoom, step back and forward, replay a chapter, see the whole lesson, follow the tutor's camera. Hovering an item shows `step n · id · chapter`, and a click copies it, so I can say "step 4, eq2" in the terminal without the page ever talking to the model. Clear and Save are the only buttons that write, and Clear asks again if the board changed while I was deciding.
+What I can do on the page: pan, zoom, step back and forward, replay a chapter, see the whole lesson, follow the tutor's camera. Hovering an item shows `step n · id · chapter`, and a click copies it, so I can say "step 4, eq2" in the terminal without the page ever talking to the model. New board, Clear and Save are the only buttons that write, and the first two ask again if the board changed while I was deciding.
 
-Sliders on a plot are the one control that changes what an item shows. They still don't write: the values live in my tab, so the tutor, the snapshots and other tabs see each slider where the tutor set it, and a click on the plot copies a reference with my values, so I can say "with w = 4.5" in the terminal. The expressions they feed are the same JSON the server checked; moving a slider runs no new code.
+I decide when a new board starts, not the tutor. New board (or `/board new`) saves the lesson under its title and today's date and gives me an empty board; until I press it, the tutor keeps adding chapters to the one that's up, and it's told to ask before drawing on a lesson it doesn't recognise.
+
+Sliders on a plot are the one control that changes what an item shows. They still don't write: the board, the snapshots and other tabs keep each slider where the tutor set it, and a click on the plot copies a reference with my values, so I can say "with w = 4.5" in the terminal. The expressions they feed are the same JSON the server checked; moving a slider runs no new code.
+
+The tutor can see my view, though, when it looks. At first nothing about my tab left it, and the tutor taught blind: it couldn't tell that I had stepped back three steps, or where I'd left a slider, unless I typed it. Now the tab tells the server what it shows (the step, the chapter in view, slider read-outs, the item I last clicked, the covers I lifted), and `board_read` passes that on as one line. Two rules keep it from becoming a second input channel: it never starts a model turn (the tutor reads it when it next reads the board), and it carries no free text, only ids that exist, numbers and slider read-outs.
+
+Covers use the same line. An item with `cover: true` stays behind a panel until I click it, so the tutor can draw a question, put the answer up covered and ask me to predict. Whether I looked is my tab's state, and the tutor can see it.
+
+Pointing is the other half. A teacher at a board mostly points, and drawing is the expensive way to do it. `focus` rings the items the tutor is talking about and dims the rest until its next update, with nothing added to the board.
 
 Because the page never talks to the model, the tutor can't tell on its own whether I'm watching. The server can, so read, update and load results end with "No browser is showing the board" when nobody is, and the tutor knows to call `board_open` instead of drawing for an empty room. The headless page behind the layout checks doesn't count as a viewer.
 
@@ -22,7 +30,7 @@ Because the page never talks to the model, the tutor can't tell on its own wheth
 
 Why: one learner workflow across every agent. If the Claude Code board drifted from the pi one, a learner would have two tools to learn, and every fix would have to happen twice. pi builds the schemas from `tools.mjs` with its own TypeBox when it loads the extension. The MCP server reads them from `mcp/schemas.json`, which `npm run build` writes from the same code, so it needs no TypeBox at runtime. The tests check that both sides send the model identical names, descriptions and JSON schemas, and CI fails if `mcp/schemas.json` is stale.
 
-The two boards are separate on purpose: separate servers, tokens and data folders (the MCP board uses the `mcp/` subfolder), so one agent can never overwrite the other's autosave. Moving a lesson between them is copying a save file.
+One board, though, not one per agent. At first pi and the MCP server each had their own, so one could never overwrite the other's autosave. But a lesson is one thing, and I want to carry on in Claude Code what I started in pi without copying files. Now the first session on a data folder hosts the board and the others join it: their tool calls run in the host, so there's still one state, one revision counter and one writer of the autosave. When the host ends, the next session to need the board hosts it again from the autosave, on the same port with the same token and revision. No background daemon: the board lives exactly as long as some session (or `pi-math-board serve`) wants it.
 
 ## Compare-and-swap revisions
 
@@ -52,7 +60,7 @@ Why: asking a model to look at a screenshot and say what's wrong is slow, spends
 
 ## Small at rest
 
-Not every pi session is a lesson, so an unused board shouldn't tax every turn. In pi only `board_open` is active until the board is opened: 255 characters per turn instead of 12,204 for all seven tools. The long reference (artifact formats, SVG rules, plot grammar, animation, layout) lives in `board_docs`, which the tutor fetches by topic before it uses a format for the first time. The `board_teaching` section is constant text, so the prompt cache holds.
+Not every pi session is a lesson, so an unused board shouldn't tax every turn. In pi only `board_open` is active until the board is opened: 255 characters per turn instead of 13,058 for all seven tools. The long reference (artifact formats, SVG rules, plot grammar, animation, layout) lives in `board_docs`, which the tutor fetches by topic before it uses a format for the first time. The `board_teaching` section is constant text, so the prompt cache holds.
 
 ## Strict input, honest reports
 
@@ -80,6 +88,10 @@ How it's fenced: each artifact gets a sandboxed frame with an opaque origin, ser
 
 A frame can't hurt the board page, but it can block it: sandboxed frames from the same host share the page's process in Safari and Chromium, so `while (true) {}` freezes the tab. Each new frame therefore runs first in the headless layout check, one at a time, and my browser gets it only after it reported ready there; a layout check goes through every new frame its update added, so the tutor hears about each one in that update's result. That catches mistakes, not code written to slip past it, so a frozen tab has a way out: `&html=off` after the token loads no frame in that tab. The check page loads frames only during its calls (a layout check just the one it checks, a snapshot all of them) and unloads them afterwards, so no model code runs there between calls, and my own tab loads a frame only when its chapter comes near the screen.
 
+## More than one way to look
+
+The board is a page because a page can draw anything, but a browser is a heavy thing to keep open for one tab. Two lighter viewers sit on the same server. The Mac app is a web view on the board's address with a window that stays where I put it; it holds no state, so it can't disagree with the page. `watch` draws snapshots as sixel graphics in a terminal pane, next to the tutor. That one is deliberately less: a still picture per step. A terminal can't run the page, and pretending it can would mean a second renderer to keep in step with the first.
+
 ## What I left out on purpose
 
 - **Human drawing.** See above. If I want to say something, I say it in the terminal, where the tutor reads it.
@@ -92,8 +104,8 @@ A frame can't hurt the board page, but it can block it: sandboxed frames from th
 Not done yet, roughly in the order I want them:
 
 - **Equation morphs.** A derivation step that transforms the line above in place (terms moving, cancelling, regrouping) instead of always writing a new line. The idea is Manim's `TransformMatchingTex`.
-- **Layout maps.** Named anchors or a free-space map for each chapter, so the tutor places items by region instead of raw coordinates and the warnings can say where there is room. Code2Video found a coarse grid beat free placement.
-- **Vectors.** A first-class vector item in plot coordinates, for forces, fields and magnetization, so an arrow sits on the axes it belongs to instead of being placed by hand next to them.
+- **Layout maps.** `below` and `rightOf` now place an item from another one's measured box, and arrows run between items, which covers most "next line" and "label this" placements. Still open: a free-space map for each chapter, so the warnings can say where there is room. Code2Video found a coarse grid beat free placement.
+- **Marks in plot coordinates.** A plot now takes `vectors` and `segments` in its own coordinates, for forces, fields and constructions. Still open: text and other marks placed in a plot's coordinates from outside it.
 - **Quiz mirroring.** The questions Eero's quiz extension asks in the terminal, shown on the board next to the drawing they're about, without changing his extension.
 
 The full survey of what else exists, and what's worth borrowing, is in [alternatives-2026-10-27.md](alternatives-2026-10-27.md).

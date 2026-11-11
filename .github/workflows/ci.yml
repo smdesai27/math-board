@@ -41,8 +41,8 @@ jobs:
 
       # Before npm test, so test/mcp.test.mjs's board_snapshot check uses the same Chromium as the
       # browser tests (without a headless browser it skips that check and says why).
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright Chromium and WebKit
+        run: npx playwright install --with-deps chromium webkit
 
       - name: Unit, HTTP, hardening and MCP tests
         run: npm test

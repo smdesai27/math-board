@@ -23,8 +23,8 @@
 
 import http from "node:http";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFile, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,7 +47,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * (public/ assets are read from disk per request, so they never go stale). index.ts stamps its
  * imports with the same list; keep the two in sync.
  */
-export const SOURCE_FILES = Object.freeze(["server.mjs", "snapshot.mjs", "export.mjs", "tools.mjs", "shared/expr.mjs", "shared/svg.mjs", "index.ts"]);
+export const SOURCE_FILES = Object.freeze(["server.mjs", "snapshot.mjs", "export.mjs", "tools.mjs", "attach.mjs", "shared/expr.mjs", "shared/svg.mjs", "index.ts"]);
 function sourceStamp() {
   return Object.fromEntries(SOURCE_FILES.map((f) => {
     try { return [f, statSync(path.join(__dirname, f)).mtimeMs]; } catch { return [f, 0]; }
@@ -181,7 +181,7 @@ export function emptyBoard(title = DEFAULT_TITLE) {
 }
 
 export const REVEALS = ["draw", "write", "wipe", "fade", "none"];
-export const ARTIFACT_TYPES = ["svg", "mermaid", "plot", "molecule", "icon", "html"];
+export const ARTIFACT_TYPES = ["svg", "mermaid", "plot", "molecule", "icon", "html", "table", "code", "chart", "image"];
 /**
  * html artifacts: HTML and JavaScript the model writes, run in a sandboxed frame (see
  * frameDocument). Off unless the learner starts the board with MATH_BOARD_HTML=1.
@@ -276,12 +276,24 @@ const show = (v) => {
   return s === undefined ? String(v) : s.length > 40 ? `${s.slice(0, 40)}…` : s;
 };
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+/**
+ * clamp for a number the tutor gave: while an update is applied (applyUpdateReport sets
+ * `limited`), a value that had to be brought into range is noted, and the result says so.
+ */
+let limited = null;
+const limit = (v, lo, hi, what) => {
+  const c = clamp(v, lo, hi);
+  if (c !== v && limited && limited.length < 8) limited.push(`${what} ${show(v)} is outside ${lo} to ${hi}: ${c} is used`);
+  return c;
+};
 /** Board coordinates are clamped to ±1e6; anything that is not a finite number becomes 0 (lenient). */
 const NUMBER = (v) => (typeof v === "number" && Number.isFinite(v) ? clamp(v, -1e6, 1e6) : 0);
 const COLOR = (v) => (typeof v === "string" && v.length <= 32 && !/[;{}<>]|url\s*\(/i.test(v) ? v : undefined);
 const DASH = (v) => (typeof v === "string" && /^[\d.\s,]{1,40}$/.test(v) ? v.trim() : undefined);
 const LABEL = (v, n = 80) => (typeof v === "string" ? v.slice(0, n) : undefined);
-const VALID_ID = (v) => typeof v === "string" && v.length > 0 && v.length <= MAX_ID_LENGTH;
+/** Control characters (C0, DEL, C1): never in an id or a title, which reach the clipboard and a terminal's status line. */
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+const VALID_ID = (v) => typeof v === "string" && v.length > 0 && v.length <= MAX_ID_LENGTH && !CONTROL.test(v);
 
 /** Small edit distance, for "did you mean" hints on unknown fields. */
 function closeTo(a, b) {
@@ -313,6 +325,7 @@ function reader(raw, where, strict) {
     return undefined;
   };
   return {
+    where,
     has: (key) => raw[key] !== undefined,
     num(key, fallback) {
       const v = raw[key];
@@ -362,15 +375,17 @@ function reader(raw, where, strict) {
   };
 }
 
-const ANIMATION_KEYS = ["step", "reveal", "duration", "order"];
-/** Animation fields shared by every item kind (see browser playback). */
+const ANIMATION_KEYS = ["step", "reveal", "duration", "order", "cover"];
+/** Animation fields shared by every item kind (see browser playback), and `cover`. */
 function readAnimation(r, out) {
+  // cover: hidden behind a panel in the learner's tab until they click it (predict, then look).
+  if (r.bool("cover") === true) out.cover = true;
   const step = r.int("step", 0, 1e6);
   if (step !== undefined) out.step = step;
   const reveal = r.oneOf("reveal", REVEALS);
   if (reveal) out.reveal = reveal;
   const duration = r.num("duration");
-  if (duration !== undefined) out.duration = clamp(Math.round(duration), 0, 10000);
+  if (duration !== undefined) out.duration = limit(Math.round(duration), 0, 10000, `${r.where}: duration`);
   const order = r.num("order");
   if (order !== undefined) out.order = order;
   return out;
@@ -385,11 +400,11 @@ export function sanitizeChapter(raw, { strict = false, where = "chapter" } = {})
   const r = reader(raw, where, strict);
   const out = {
     id: r.id("id") ?? randomUUID(),
-    title: r.str("title", 120) ?? "",
+    title: (r.str("title", 120) ?? "").replace(new RegExp(CONTROL, "g"), " "),
     x: r.num("x", 0),
     y: r.num("y", 0),
-    w: clamp(r.num("w", 0) || CHAPTER.w, 200, 20000),
-    h: clamp(r.num("h", 0) || CHAPTER.h, 150, 20000),
+    w: limit(r.num("w", 0) || CHAPTER.w, 200, 20000, `${where}: w`),
+    h: limit(r.num("h", 0) || CHAPTER.h, 150, 20000, `${where}: h`),
   };
   if (r.bool("frame") === false) out.frame = false;
   return out;
@@ -441,14 +456,14 @@ function equationOf(eq, { strict = false, keys: checkKeys = strict, where = "equ
   if (color) out.color = color;
   // Optional font scale relative to the default display size (1 = default).
   const size = r.num("size");
-  if (size !== undefined) out.size = clamp(size, 0.3, 4);
+  if (size !== undefined) out.size = limit(size, 0.3, 4, `${where}: size`);
   // Board-space placement; applyUpdate places an equation without x,y below the last one.
   const x = r.num("x");
   if (x !== undefined) out.x = x;
   const y = r.num("y");
   if (y !== undefined) out.y = y;
   const z = r.num("z");
-  if (z !== undefined) out.z = clamp(z, -1000, 1000);
+  if (z !== undefined) out.z = limit(z, -1000, 1000, `${where}: z`);
   const chapter = r.id("chapter");
   if (chapter) out.chapter = chapter;
   readAnimation(r, out);
@@ -504,7 +519,7 @@ function checkExpr(src, vars, where) {
   try { compileExpr(src, vars); return src; } catch (e) { fail(`plot ${where}: "${String(src).slice(0, 60)}": ${e.message}`); }
 }
 const STYLE_KEYS = ["color", "width", "dash", "label"];
-const PLOT_KEYS = ["xRange", "yRange", "grid", "axes", "ticks", "equalAspect", "xLabel", "yLabel", "title", "params", "functions", "parametric", "areas", "points", "vlines", "hlines"];
+const PLOT_KEYS = ["xRange", "yRange", "grid", "axes", "ticks", "equalAspect", "xLabel", "yLabel", "title", "params", "functions", "parametric", "areas", "points", "vlines", "hlines", "vectors", "segments"];
 const PLOT_PART_KEYS = {
   params: keys("name", "min", "max", "value", "step", "label", "period"),
   functions: keys("expr", "domain", STYLE_KEYS),
@@ -513,6 +528,8 @@ const PLOT_PART_KEYS = {
   points: keys("x", "y", "size", "drag", STYLE_KEYS),
   vlines: keys("x", STYLE_KEYS),
   hlines: keys("y", STYLE_KEYS),
+  vectors: keys("from", "to", STYLE_KEYS),
+  segments: keys("from", "to", STYLE_KEYS),
 };
 // A slider's name is a variable in the plot's expressions, so it cannot be one of their own names.
 const PARAM_NAME = /^[A-Za-z][A-Za-z0-9_]{0,15}$/;
@@ -605,8 +622,174 @@ function sanitizePlot(raw, strict, where, height) {
   });
   out.vlines = list("vlines", 12).map(([v, pr, i]) => ({ x: coord(v, pr, "x", 0, `vlines[${i}]`), ...style(pr) }));
   out.hlines = list("hlines", 12).map(([h, pr, i]) => ({ y: coord(h, pr, "y", 0, `hlines[${i}]`), ...style(pr) }));
-  if (!out.functions.length && !out.parametric.length && !out.points.length && !out.areas.length) fail("plot needs at least one of functions, parametric, points or areas");
+  // Arrows and line segments in the plot's own coordinates (forces, fields, constructions): each
+  // end is [x, y], numbers or, like a point's, expressions of the sliders.
+  const ends = (name, max) => list(name, max).map(([v, pr, i]) => {
+    const end = (key) => {
+      const p = v[key], at = `${name}[${i}].${key}`;
+      if (!Array.isArray(p) || p.length !== 2) fail(`plot ${at} must be [x, y], got ${show(p)}`);
+      const part = { x: p[0], y: p[1] }, rd = reader(part, `${where} ${at}`, strict);
+      return [coord(part, rd, "x", 0, at), coord(part, rd, "y", 0, at)];
+    };
+    return { from: end("from"), to: end("to"), ...style(pr) };
+  });
+  const vectors = ends("vectors", 24), segments = ends("segments", 24);
+  if (vectors.length) out.vectors = vectors;
+  if (segments.length) out.segments = segments;
+  if (!out.functions.length && !out.parametric.length && !out.points.length && !out.areas.length && !vectors.length && !segments.length)
+    fail("plot needs at least one of functions, parametric, points, areas, vectors or segments");
   return out;
+}
+
+/* ---- table, code and chart artifacts: data the page draws itself (no source that runs or is parsed as markup) ---- */
+
+const MAX_TABLE_ROWS = 40, MAX_TABLE_COLS = 12, MAX_CODE_LINES = 80, MAX_CODE_CHARS = 6000, MAX_BARS = 40, MAX_HISTOGRAM_VALUES = 5000;
+
+/** A table: rows of cells (text or numbers; "$...$" is typeset as math), an optional header row, highlights. */
+function sanitizeTable(raw, r, where, strict) {
+  const cell = (v, at) => {
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+    if (typeof v !== "string" || v.length > 120) fail(`${where}: ${at} must be text of at most 120 characters or a number, got ${show(v)}`);
+    return v;
+  };
+  if (!Array.isArray(raw.rows) || !raw.rows.length || raw.rows.length > MAX_TABLE_ROWS) fail(`${where}: table needs rows: 1 to ${MAX_TABLE_ROWS} arrays of cells`);
+  const cols = Array.isArray(raw.header) ? raw.header.length : Array.isArray(raw.rows[0]) ? raw.rows[0].length : 0;
+  if (!cols || cols > MAX_TABLE_COLS) fail(`${where}: a table has 1 to ${MAX_TABLE_COLS} columns`);
+  const out = {};
+  if (raw.header !== undefined) {
+    if (!Array.isArray(raw.header)) fail(`${where}: header must be an array of column heads`);
+    out.header = raw.header.map((v, c) => cell(v, `header[${c}]`));
+  }
+  out.rows = raw.rows.map((row, i) => {
+    if (!Array.isArray(row) || row.length !== cols) fail(`${where}: rows[${i}] must have ${cols} cells like ${raw.header !== undefined ? "the header" : "the first row"}, got ${Array.isArray(row) ? row.length : show(row)}`);
+    return row.map((v, c) => cell(v, `rows[${i}][${c}]`));
+  });
+  const align = r.oneOf("align", ["left", "center", "right"]);
+  if (align && align !== "center") out.align = align;
+  const size = r.num("size");
+  if (size !== undefined) out.size = limit(size, 10, 48, `${where}: size`);
+  if (raw.highlight !== undefined) {
+    if (!Array.isArray(raw.highlight) || raw.highlight.length > 60) fail(`${where}: highlight must be a list of at most 60 of {row?, col?, color?}`);
+    out.highlight = raw.highlight.map((h, i) => {
+      const at = `${where} highlight[${i}]`;
+      if (!h || typeof h !== "object" || Array.isArray(h)) fail(`${at} must be {row?, col?, color?}`);
+      if (strict) onlyKeys(h, keys("row", "col", "color"), at);
+      const hr = reader(h, at, strict), o = {};
+      const row = hr.int("row", 0, out.rows.length - 1), col = hr.int("col", 0, cols - 1);
+      if (row === undefined && col === undefined) fail(`${at} needs row (0 = the first row under the header), col, or both`);
+      if (strict && ((h.row !== undefined && h.row >= out.rows.length) || (h.col !== undefined && h.col >= cols))) fail(`${at}: the table has rows 0-${out.rows.length - 1} and columns 0-${cols - 1}`);
+      if (row !== undefined) o.row = row;
+      if (col !== undefined) o.col = col;
+      const color = hr.color("color");
+      if (color) o.color = color;
+      return o;
+    });
+  }
+  return { fields: out, cols, lines: out.rows.length + (out.header ? 1 : 0) };
+}
+
+/** A code listing: plain text in a monospace font, with line numbers and highlighted lines. Nothing is run. */
+function sanitizeCode(raw, r, where, strict) {
+  if (typeof raw.source !== "string" || !raw.source.trim()) fail(`${where}: code needs source (the listing as text)`);
+  // The size check comes first: nothing below runs over a source of unbounded length.
+  if (raw.source.length > MAX_CODE_CHARS * 2) fail(`${where}: code takes at most ${MAX_CODE_LINES} lines and ${MAX_CODE_CHARS} characters (it has ${raw.source.length} characters): show the part you are teaching`);
+  let source = raw.source.replace(/\r\n?/g, "\n").replace(/\t/g, "  ");
+  let end = source.length;
+  while (end > 0 && source[end - 1] === "\n") end--;
+  source = source.slice(0, end);
+  const lines = source.split("\n");
+  if (source.length > MAX_CODE_CHARS || lines.length > MAX_CODE_LINES) fail(`${where}: code takes at most ${MAX_CODE_LINES} lines and ${MAX_CODE_CHARS} characters (it has ${lines.length} lines, ${source.length} characters): show the part you are teaching`);
+  const out = { source };
+  const language = r.str("language", 24);
+  if (language) out.language = language;
+  if (r.bool("lineNumbers") === false) out.lineNumbers = false;
+  const size = r.num("size");
+  if (size !== undefined) out.size = limit(size, 8, 40, `${where}: size`);
+  if (raw.highlight !== undefined) {
+    const ok = Array.isArray(raw.highlight) && raw.highlight.length <= MAX_CODE_LINES && raw.highlight.every((n) => Number.isInteger(n) && n >= 1 && n <= lines.length);
+    if (!ok) fail(`${where}: highlight must be a list of line numbers from 1 to ${lines.length}, got ${show(raw.highlight)}`);
+    out.highlight = [...new Set(raw.highlight)].sort((a, b) => a - b);
+  }
+  return { fields: out, lines: lines.length, longest: Math.max(...lines.map((l) => l.length)) };
+}
+
+/** A bar chart (bars: label and value) or a histogram (values, binned by the page). */
+function sanitizeChart(raw, r, where, strict) {
+  const kind = raw.kind;
+  if (kind !== "bar" && kind !== "histogram") fail(`${where}: chart kind must be "bar" or "histogram", got ${show(kind)}`);
+  const out = { kind };
+  for (const k of ["xLabel", "yLabel", "title"]) { const v = r.str(k, 60); if (v) out[k] = v; }
+  const color = r.color("color");
+  if (color) out.color = color;
+  const num = (v) => typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= 1e9;
+  if (raw.yRange !== undefined) {
+    if (!Array.isArray(raw.yRange) || raw.yRange.length !== 2 || !raw.yRange.every(num) || !(raw.yRange[1] > raw.yRange[0])) fail(`${where}: yRange must be [low, high]`);
+    out.yRange = raw.yRange;
+  }
+  if (kind === "bar") {
+    if (raw.values !== undefined || raw.bins !== undefined || raw.range !== undefined) fail(`${where}: a bar chart takes bars:[{label, value}]; values, bins and range are for a histogram`);
+    if (!Array.isArray(raw.bars) || !raw.bars.length || raw.bars.length > MAX_BARS) fail(`${where}: a bar chart needs bars: 1 to ${MAX_BARS} of {label, value, color?}`);
+    out.bars = raw.bars.map((b, i) => {
+      const at = `${where} bars[${i}]`;
+      if (!b || typeof b !== "object" || Array.isArray(b)) fail(`${at} must be {label, value, color?}`);
+      if (strict) onlyKeys(b, keys("label", "value", "color"), at);
+      if (!num(b.value)) fail(`${at}: value must be a number, got ${show(b.value)}`);
+      const br = reader(b, at, strict), o = { label: br.str("label", 40) ?? "", value: b.value };
+      const c = br.color("color");
+      if (c) o.color = c;
+      return o;
+    });
+    if (r.bool("showValues") === false) out.showValues = false;
+  } else {
+    if (raw.bars !== undefined || raw.showValues !== undefined) fail(`${where}: a histogram takes values:[numbers]; bars and showValues are for a bar chart`);
+    if (!Array.isArray(raw.values) || raw.values.length < 2 || raw.values.length > MAX_HISTOGRAM_VALUES || !raw.values.every(num)) fail(`${where}: a histogram needs values: 2 to ${MAX_HISTOGRAM_VALUES} numbers`);
+    out.values = raw.values;
+    const bins = r.int("bins", 2, 60);
+    if (bins !== undefined) out.bins = bins;
+    if (raw.range !== undefined) {
+      if (!Array.isArray(raw.range) || raw.range.length !== 2 || !raw.range.every(num) || !(raw.range[1] > raw.range[0])) fail(`${where}: range must be [low, high]`);
+      out.range = raw.range;
+    }
+  }
+  return out;
+}
+
+/* ---- image artifacts: a picture file from the learner's disk, copied into the data folder ---- */
+
+const IMAGE_FILE_RE = /^[a-f0-9]{64}\.(png|jpg|gif|webp)$/;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const IMAGE_MIME = { png: "image/png", jpg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+
+/** { ext, w, h } of a PNG, JPEG, GIF or WebP from its first bytes, or null. The file's name is not trusted. */
+export function imageInfo(buf) {
+  if (buf.length > 24 && buf.readUInt32BE(0) === 0x89504e47 && buf.readUInt32BE(4) === 0x0d0a1a0a) return { ext: "png", w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+  if (buf.length > 10 && (buf.toString("latin1", 0, 6) === "GIF87a" || buf.toString("latin1", 0, 6) === "GIF89a")) return { ext: "gif", w: buf.readUInt16LE(6), h: buf.readUInt16LE(8) };
+  if (buf.length > 30 && buf.toString("latin1", 0, 4) === "RIFF" && buf.toString("latin1", 8, 12) === "WEBP") {
+    const kind = buf.toString("latin1", 12, 16);
+    if (kind === "VP8X") return { ext: "webp", w: 1 + buf.readUIntLE(24, 3), h: 1 + buf.readUIntLE(27, 3) };
+    if (kind === "VP8 ") return { ext: "webp", w: buf.readUInt16LE(26) & 0x3fff, h: buf.readUInt16LE(28) & 0x3fff };
+    if (kind === "VP8L") { const b = buf.readUInt32LE(21); return { ext: "webp", w: 1 + (b & 0x3fff), h: 1 + ((b >> 14) & 0x3fff) }; }
+    return null;
+  }
+  if (buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+    // JPEG: walk the segments to the frame header (SOF0-SOF15, without the DHT, JPG and DAC markers).
+    for (let at = 2; at + 9 < buf.length; ) {
+      if (buf[at] !== 0xff) return null;
+      const marker = buf[at + 1];
+      if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) return { ext: "jpg", w: buf.readUInt16BE(at + 7), h: buf.readUInt16BE(at + 5) };
+      at += 2 + buf.readUInt16BE(at + 2);
+    }
+  }
+  return null;
+}
+
+/**
+ * The folders an image artifact's path may be in: $MATH_BOARD_IMAGE_DIRS (separated like PATH),
+ * else the learning folder ($MATH_BOARD_LEARN_DIR, $PI_LEARN_DIR or ~/Learn).
+ */
+export function imageDirs(env = process.env) {
+  const list = env.MATH_BOARD_IMAGE_DIRS ? env.MATH_BOARD_IMAGE_DIRS.split(path.delimiter) : [env.MATH_BOARD_LEARN_DIR ?? env.PI_LEARN_DIR ?? path.join(homedir(), "Learn")];
+  return list.map((d) => d.trim()).filter((d) => path.isAbsolute(d)).map((d) => path.resolve(d));
 }
 
 const ARTIFACT_COMMON_KEYS = ["type", "id", "x", "y", "width", "height", "label", "z", "opacity", "chapter", ...ANIMATION_KEYS];
@@ -617,6 +800,11 @@ const ARTIFACT_KEYS = {
   svg: keys(ARTIFACT_COMMON_KEYS, "source"),
   mermaid: keys(ARTIFACT_COMMON_KEYS, "source"),
   html: keys(ARTIFACT_COMMON_KEYS, "source", "libs"),
+  table: keys(ARTIFACT_COMMON_KEYS, "rows", "header", "align", "size", "highlight"),
+  code: keys(ARTIFACT_COMMON_KEYS, "source", "language", "lineNumbers", "size", "highlight"),
+  chart: keys(ARTIFACT_COMMON_KEYS, "kind", "bars", "values", "bins", "range", "yRange", "xLabel", "yLabel", "title", "color", "showValues"),
+  // `path` is what the tutor gives; the board keeps `file` (the copy in the data folder) and `natural` (its size).
+  image: keys(ARTIFACT_COMMON_KEYS, "path", "file", "natural"),
 };
 
 /** Mermaid text: rendered with securityLevel strict and shown as an image; links, callbacks, markup and directives are refused. */
@@ -640,8 +828,8 @@ export function sanitizeArtifact(raw, { strict = false, keys: checkKeys = strict
     id: r.id("id") ?? randomUUID(),
     x: r.num("x", 0),
     y: r.num("y", 0),
-    width: clamp(r.num("width", 0) || 360, 80, 1200),
-    height: clamp(r.num("height", 0) || 280, 60, 800),
+    width: limit(r.num("width", 0) || 360, 80, 1200, `${where}: width`),
+    height: limit(r.num("height", 0) || 280, 60, 800, `${where}: height`),
   };
   if (raw.type === "plot") Object.assign(out, sanitizePlot(raw, strict, where, out.height));
   else if (raw.type === "html") {
@@ -670,6 +858,31 @@ export function sanitizeArtifact(raw, { strict = false, keys: checkKeys = strict
     if (typeof raw.smiles !== "string" || !raw.smiles.trim() || raw.smiles.length > 500 || !/^[A-Za-z0-9@+\-[\]()=#$:./\\%*~>]+$/.test(raw.smiles.trim()))
       fail("molecule needs a SMILES string (e.g. 'CCO' for ethanol, 'c1ccccc1' for benzene), at most 500 characters, no spaces");
     out.smiles = raw.smiles.trim();
+  } else if (raw.type === "table") {
+    const t = sanitizeTable(raw, r, where, strict);
+    Object.assign(out, t.fields);
+    // A size from the content when none is given: about 130 px a column and 44 px a row.
+    if (!r.has("width")) out.width = clamp(t.cols * 130, 80, 1200);
+    if (!r.has("height")) out.height = clamp(t.lines * 44, 60, 800);
+  } else if (raw.type === "code") {
+    const c = sanitizeCode(raw, r, where, strict);
+    Object.assign(out, c.fields);
+    if (!r.has("width")) out.width = clamp(c.longest * 10.4 + (out.lineNumbers === false ? 32 : 76), 200, 1200);
+    if (!r.has("height")) out.height = clamp(c.lines * 24 + 28, 60, 800);
+  } else if (raw.type === "chart") {
+    Object.assign(out, sanitizeChart(raw, r, where, strict));
+  } else if (raw.type === "image") {
+    // BoardServer#ingestImages turns a path into `file` before the update is applied.
+    if (raw.path !== undefined) fail(`${where}: this board cannot read image files from a path here (images are added through board_update)`);
+    if (typeof raw.file !== "string" || !IMAGE_FILE_RE.test(raw.file)) fail(`${where}: image needs path: a PNG, JPEG, GIF or WebP file on the learner's disk`);
+    out.file = raw.file;
+    const n = raw.natural;
+    if (Array.isArray(n) && n.length === 2 && n.every((v) => Number.isInteger(v) && v > 0 && v <= 65535)) {
+      out.natural = n;
+      // Keep the picture's aspect ratio when one dimension (or none) is given.
+      if (!r.has("height")) out.height = clamp((out.width * n[1]) / n[0], 60, 800);
+      else if (!r.has("width")) out.width = clamp((out.height * n[0]) / n[1], 80, 1200);
+    }
   } else if (raw.type === "svg") {
     out.source = checkSvgSource(raw.source);
   } else if (raw.type === "mermaid") {
@@ -678,9 +891,9 @@ export function sanitizeArtifact(raw, { strict = false, keys: checkKeys = strict
   const label = r.str("label", 120);
   if (label !== undefined) out.label = label;
   const z = r.num("z");
-  if (z !== undefined) out.z = clamp(z, -1000, 1000);
+  if (z !== undefined) out.z = limit(z, -1000, 1000, `${where}: z`);
   const opacity = r.num("opacity");
-  if (opacity !== undefined) out.opacity = clamp(opacity, 0, 1);
+  if (opacity !== undefined) out.opacity = limit(opacity, 0, 1, `${where}: opacity`);
   const chapter = r.id("chapter");
   if (chapter) out.chapter = chapter;
   readAnimation(r, out);
@@ -718,13 +931,13 @@ function shapeOf(shape, { strict = false, keys: checkKeys = strict, where = "sha
     case "stroke":
       out.points = points(strict ? 2 : 1, MAX_POINTS_PER_STROKE);
       out.color = r.color("color") ?? CHALK;
-      out.width = clamp(r.num("width", 0) || 3, 0.5, 100);
+      out.width = limit(r.num("width", 0) || 3, 0.5, 100, `${where}: width`);
       break;
     case "line":
     case "arrow":
       out.points = points(2, type === "arrow" && strict ? 4 : 16);
       out.color = r.color("color") ?? CHALK;
-      out.width = clamp(r.num("width", 0) || 2, 0.5, 100);
+      out.width = limit(r.num("width", 0) || 2, 0.5, 100, `${where}: width`);
       break;
     case "rect":
     case "ellipse": {
@@ -743,7 +956,7 @@ function shapeOf(shape, { strict = false, keys: checkKeys = strict, where = "sha
       out.text = text;
       out.x = r.num("x", 0);
       out.y = r.num("y", 0);
-      out.size = clamp(r.num("size", 0) || 24, 8, 200);
+      out.size = limit(r.num("size", 0) || 24, 8, 200, `${where}: size`);
       out.color = r.color("color") ?? CHALK;
       const font = r.oneOf("font", ["serif", "sans", "mono"]);
       if (font) out.font = font;
@@ -757,12 +970,12 @@ function shapeOf(shape, { strict = false, keys: checkKeys = strict, where = "sha
   const label = r.str("label", 200);
   if (label !== undefined) out.label = label;
   const z = r.num("z");
-  if (z !== undefined) out.z = clamp(z, -1000, 1000);
+  if (z !== undefined) out.z = limit(z, -1000, 1000, `${where}: z`);
   const chapter = r.id("chapter");
   if (chapter) out.chapter = chapter;
   readAnimation(r, out);
   const opacity = r.num("opacity");
-  if (opacity !== undefined) out.opacity = clamp(opacity, 0, 1);
+  if (opacity !== undefined) out.opacity = limit(opacity, 0, 1, `${where}: opacity`);
   if (type !== "text") {
     const dash = r.dash("dash");
     if (dash) out.dash = dash;
@@ -784,7 +997,39 @@ export function sanitizeShape(shape, opts = {}) {
 /* applyUpdate                                                         */
 /* ------------------------------------------------------------------ */
 
-const UPDATE_KEYS = keys("title", "clear", "chapters", "equations", "scene", "items", "camera");
+const UPDATE_KEYS = keys("title", "clear", "chapters", "equations", "scene", "items", "camera", "focus");
+
+/* ---- placing an item next to another one: below, rightOf, and arrows from one item to another ---- */
+
+/**
+ * Where an item is on the board when the layout check has not measured it (yet): from its stored
+ * fields, in board coordinates. Exact for artifacts, rects, ellipses and point shapes; a guess
+ * for text and equations, whose size only the browser knows.
+ */
+export function estimateBox(it, kind, origin = { x: 0, y: 0 }) {
+  let box;
+  if (kind === "artifact") box = { x: it.x, y: it.y, w: it.width, h: it.height };
+  else if (kind === "equation") {
+    const size = it.size ?? 1;
+    box = { x: it.x ?? EQUATION_LAYOUT.x, y: it.y ?? EQUATION_LAYOUT.y, w: Math.min(900, Math.max(60, String(it.latex).replace(/\\[a-zA-Z]+|[{}_^]/g, "").length * 15 * size)), h: 56 * size };
+  } else if (Array.isArray(it.points)) {
+    const xs = it.points.map((p) => p[0]), ys = it.points.map((p) => p[1]);
+    box = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+  } else if (it.type === "text") {
+    const lines = String(it.text).split("\n"), size = it.size ?? 24;
+    const w = Math.max(...lines.map((l) => l.length)) * size * 0.5;
+    box = { x: it.x - (it.anchor === "middle" ? w / 2 : it.anchor === "end" ? w : 0), y: it.y - size * 0.8, w, h: lines.length * size * 1.25 };
+  } else box = { x: it.x, y: it.y, w: it.w, h: it.h };
+  return { x: (box.x || 0) + origin.x, y: (box.y || 0) + origin.y, w: Math.max(0, box.w || 0), h: Math.max(0, box.h || 0) };
+}
+
+/** The point where the line from a box's centre toward `to` leaves the box (grown by `pad`). */
+function edgePoint(box, to, pad) {
+  const cx = box.x + box.w / 2, cy = box.y + box.h / 2, dx = to.x - cx, dy = to.y - cy;
+  if (!dx && !dy) return { x: cx, y: cy };
+  const k = Math.min(dx ? (box.w / 2 + pad) / Math.abs(dx) : Infinity, dy ? (box.h / 2 + pad) / Math.abs(dy) : Infinity, 1);
+  return { x: cx + dx * k, y: cy + dy * k };
+}
 const SCENE_KEYS = keys("mode", "shapes", "artifacts");
 const sceneItems = (board) => [...board.scene.shapes, ...board.scene.artifacts, ...board.equations];
 
@@ -833,7 +1078,18 @@ export function legacyEquationPositions(equations) {
  * Returns { board, warnings, touched }: warnings found without a browser (overlapping chapters)
  * and the ids of the items and chapters the update added or changed.
  */
-export function applyUpdateReport(state, update, { strict = true, html = false } = {}) {
+export function applyUpdateReport(state, update, options = {}) {
+  // Numbers brought into range while the update is read (see `limit`) are warnings of its result.
+  const notes = (limited = options.strict === false ? null : []);
+  try {
+    const report = applyUpdateChecked(state, update, options);
+    if (notes?.length) report.warnings.push(...notes);
+    return report;
+  } finally {
+    limited = null;
+  }
+}
+function applyUpdateChecked(state, update, { strict = true, html = false, boxes = null } = {}) {
   if (!update || typeof update !== "object" || Array.isArray(update)) fail("update must be an object");
   for (const key of Object.keys(update)) if (!UPDATE_KEYS.has(key)) fail(`unknown update field: ${key}`);
   if (update.equations !== undefined && !Array.isArray(update.equations)) fail("equations must be an array");
@@ -842,7 +1098,7 @@ export function applyUpdateReport(state, update, { strict = true, html = false }
   const warnings = [];
   if (update.title !== undefined) {
     if (typeof update.title !== "string" || update.title.length > 200) fail("title must be a string of at most 200 characters");
-    next.title = update.title;
+    next.title = update.title.replace(new RegExp(CONTROL, "g"), " ");
   }
 
   const clear = update.clear;
@@ -868,13 +1124,82 @@ export function applyUpdateReport(state, update, { strict = true, html = false }
 
   if (update.chapters !== undefined) applyChapterOps(next, update.chapters, strict, touched);
 
+  // An item added without an id gets a short one from its type (eq1, text2, plot1): the tutor
+  // reads it back and the learner says it ("step 4, eq2"), so it should not be a UUID.
+  let usedIds = null;
+  const shortId = (prefix) => {
+    usedIds ??= new Set([
+      ...[...next.equations, ...next.scene.shapes, ...next.scene.artifacts].map((it) => it.id),
+      ...[...(Array.isArray(update.equations) ? update.equations : []), ...(Array.isArray(update.scene?.shapes) ? update.scene.shapes : []), ...(Array.isArray(update.scene?.artifacts) ? update.scene.artifacts : [])].map((it) => it?.id),
+    ]);
+    for (let n = 1; ; n++) {
+      const id = `${prefix}${n}`;
+      if (!usedIds.has(id)) {
+        usedIds.add(id);
+        return id;
+      }
+    }
+  };
+  // Items placed relative to another one (below, rightOf; an arrow's from and to) get plain x,y
+  // or points here, before validation, and those are what is stored: nothing moves later. The
+  // other item's box is the one the layout check measured (`boxes`, board coordinates), else an
+  // estimate; an item added earlier in this same update can only be estimated.
+  const pending = new Map(); // id -> { it, kind } added by this update so far
+  const originOf = (chapter) => {
+    const c = next.chapters.find((ch) => ch.id === chapter);
+    return c ? { x: c.x, y: c.y } : { x: 0, y: 0 };
+  };
+  const boxOf = (id, where, field) => {
+    if (!VALID_ID(id)) fail(`${where}: ${field} must be the id of an item`);
+    const fresh = pending.get(id);
+    const eq = !fresh && next.equations.find((e) => e.id === id);
+    const shape = !fresh && !eq && next.scene.shapes.find((s) => s.id === id);
+    const artifact = !fresh && !eq && !shape && next.scene.artifacts.find((a) => a.id === id);
+    const found = fresh ?? (eq ? { it: eq, kind: "equation" } : shape ? { it: shape, kind: "shape" } : artifact ? { it: artifact, kind: "artifact" } : null);
+    if (!found) fail(`${where}: ${field}: no item ${show(id)} on the board or earlier in this update`);
+    return { ...((!fresh && boxes?.get(id)) || estimateBox(found.it, found.kind, originOf(found.it.chapter))), chapter: found.it.chapter };
+  };
+  const place = (raw, kind, where) => {
+    if (!strict || !raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+    const { below, rightOf, gap, from, to, ...rest } = raw;
+    const relative = below !== undefined || rightOf !== undefined, linked = from !== undefined || to !== undefined;
+    if (!relative && !linked) {
+      if (gap !== undefined) fail(`${where}: gap goes with below, rightOf or an arrow's from and to`);
+      return raw;
+    }
+    if (gap !== undefined && !(typeof gap === "number" && Number.isFinite(gap) && gap >= 0)) fail(`${where}: gap must be a number of at least 0, got ${show(gap)}`);
+    const local = (p, o) => [Math.round(p.x - o.x), Math.round(p.y - o.y)];
+    if (linked) {
+      if (kind !== "shape" || raw.type !== "arrow") fail(`${where}: from and to are for arrows`);
+      if (relative || raw.points !== undefined) fail(`${where}: an arrow takes points, or from and to, not both`);
+      if (from === undefined || to === undefined) fail(`${where}: an arrow between items needs both from and to`);
+      if (from === to) fail(`${where}: from and to are the same item (${show(from)}); an arrow joins two items`);
+      const a = boxOf(from, where, "from"), b = boxOf(to, where, "to");
+      const chapter = rest.chapter ?? a.chapter, o = originOf(chapter), pad = Math.min(gap ?? 8, 200);
+      const centre = (box) => ({ x: box.x + box.w / 2, y: box.y + box.h / 2 });
+      return { ...rest, ...(chapter && { chapter }), points: [local(edgePoint(a, centre(b), pad), o), local(edgePoint(b, centre(a), pad), o)] };
+    }
+    if (below !== undefined && rightOf !== undefined) fail(`${where}: give below or rightOf, not both`);
+    if (kind === "shape" && !["text", "rect", "ellipse"].includes(raw.type)) fail(`${where}: below and rightOf place text, rects, ellipses, equations and artifacts; a ${show(raw.type)} takes points`);
+    const t = boxOf(below ?? rightOf, where, below !== undefined ? "below" : "rightOf");
+    const chapter = rest.chapter ?? t.chapter, o = originOf(chapter), g = Math.min(gap ?? 24, 1000);
+    const [x, top] = local(below !== undefined ? { x: t.x, y: t.y + t.h + g } : { x: t.x + t.w + g, y: t.y }, o);
+    // A text's y is its baseline, about 0.8 of its size below its top.
+    const y = kind === "shape" && raw.type === "text" ? Math.round(top + 0.8 * (typeof rest.size === "number" && rest.size > 0 ? clamp(rest.size, 8, 200) : 24)) : top;
+    return { ...rest, ...(chapter && { chapter }), x: rest.x ?? x, y: rest.y ?? y };
+  };
+
+  const named = (raw) => (strict && raw && typeof raw === "object" && !Array.isArray(raw) && raw.id === undefined && /^[a-z]{1,12}$/.test(raw.type ?? "") ? { ...raw, id: shortId(raw.type) } : raw);
+
   if (Array.isArray(update.equations)) {
     update.equations.forEach((op, i) => {
       const where = `equations[${i}]`;
       if (!op || typeof op !== "object") fail(`${where}: invalid equation op`);
       const { op: kind, ...fields } = op;
+      if (kind === "add" && strict && fields.id === undefined) fields.id = shortId("eq");
       if (kind === "add") {
-        const eq = equationOf(fields, { strict, where });
+        const eq = equationOf(place(fields, "equation", where), { strict, where });
+        pending.set(eq.id, { it: eq, kind: "equation" });
         if (next.equations.length >= MAX_EQUATIONS) fail(`too many equations (max ${MAX_EQUATIONS})`);
         if (next.equations.some((e) => e.id === eq.id)) fail(`${where}: duplicate equation id "${eq.id}"`);
         placeEquation(next, eq);
@@ -882,14 +1207,14 @@ export function applyUpdateReport(state, update, { strict = true, html = false }
         touched.add(eq.id);
       } else if (kind === "update") {
         const i = next.equations.findIndex((e) => e.id === op.id);
-        if (i === -1) fail(`${where}: unknown equation id: ${op.id}`);
+        if (i === -1) fail(`${where}: unknown equation id: ${show(op.id)}`);
         const { id: _id, ...changes } = fields;
         if (strict) onlyKeys(changes, EQUATION_KEYS, where);
         next.equations[i] = equationOf({ ...next.equations[i], ...changes, id: next.equations[i].id }, { strict, keys: false, where });
         touched.add(op.id);
       } else if (kind === "delete") {
         const i = next.equations.findIndex((e) => e.id === op.id);
-        if (i === -1) fail(`${where}: unknown equation id: ${op.id}`);
+        if (i === -1) fail(`${where}: unknown equation id: ${show(op.id)}`);
         next.equations.splice(i, 1);
       } else {
         fail(`${where}: invalid equation op: ${show(kind)} (add, update or delete)`);
@@ -906,8 +1231,13 @@ export function applyUpdateReport(state, update, { strict = true, html = false }
     if (!Array.isArray(rawShapes) || !Array.isArray(rawArtifacts)) fail("scene.shapes and scene.artifacts must be arrays");
     if (strict && rawShapes.length > MAX_SHAPES_PER_UPDATE) fail(`too many shapes in one update (max ${MAX_SHAPES_PER_UPDATE})`);
     if (strict && rawArtifacts.length > MAX_ARTIFACTS_PER_UPDATE) fail(`too many artifacts in one update (max ${MAX_ARTIFACTS_PER_UPDATE})`);
-    const shapes = rawShapes.map((s, i) => shapeOf(s, { strict, where: `scene.shapes[${i}]${s?.id ? ` "${String(s.id).slice(0, 64)}"` : ""}` }));
-    const artifacts = rawArtifacts.map((a, i) => sanitizeArtifact(a, { strict, html, where: `scene.artifacts[${i}]${a?.id ? ` "${String(a.id).slice(0, 64)}"` : ""}` }));
+    const added = (raw, kind, where, make) => {
+      const it = make(place(named(raw), kind, where), where);
+      pending.set(it.id, { it, kind });
+      return it;
+    };
+    const shapes = rawShapes.map((s, i) => added(s, "shape", `scene.shapes[${i}]${s?.id ? ` "${String(s.id).slice(0, 64)}"` : ""}`, (raw, where) => shapeOf(raw, { strict, where })));
+    const artifacts = rawArtifacts.map((a, i) => added(a, "artifact", `scene.artifacts[${i}]${a?.id ? ` "${String(a.id).slice(0, 64)}"` : ""}`, (raw, where) => sanitizeArtifact(raw, { strict, html, where })));
     for (const it of [...shapes, ...artifacts]) touched.add(it.id);
     if (mode === "replace") next.scene = { shapes, artifacts };
     else next.scene = { shapes: [...next.scene.shapes, ...shapes], artifacts: [...next.scene.artifacts, ...artifacts] };
@@ -944,6 +1274,16 @@ export function applyUpdateReport(state, update, { strict = true, html = false }
   for (const it of allItems)
     if (it.chapter !== undefined && !known.has(it.chapter)) fail(`item ${it.id}: unknown chapter "${it.chapter}" (add it with chapters:[{op:"add",id,...}] first)`);
   if (next.camera?.chapter && !known.has(next.camera.chapter)) next.camera = null;
+
+  // focus: the items the tutor points at. It belongs to the update that set it; the next update
+  // (which says what the tutor does next) ends it.
+  delete next.focus;
+  if (update.focus !== undefined && update.focus !== null) {
+    if (!Array.isArray(update.focus) || update.focus.length > 8 || !update.focus.every(VALID_ID)) fail("focus must be a list of at most 8 item ids");
+    const ids = new Set(allItems.map((it) => it.id));
+    for (const id of update.focus) if (!ids.has(id)) fail(`focus: no item ${show(id)} on the board`);
+    if (update.focus.length) next.focus = [...new Set(update.focus)];
+  }
 
   // Chapters this update added or moved that overlap another chapter.
   const changed = next.chapters.filter((c) => chaptersBefore.get(c.id) !== JSON.stringify(c));
@@ -1226,6 +1566,47 @@ function pidAlive(pid) {
 }
 
 const SNAPSHOT_HEADER = "x-math-board-snapshot";
+const TOKEN_RE = /^[a-f0-9]{64}$/;
+/** A tool call forwarded by another session may carry a whole update (a save's worth of SVG). */
+const MAX_TOOL_BODY_BYTES = MAX_BOARD_BYTES;
+
+/**
+ * token.json in a data folder: the token and port its board uses, kept across restarts so an
+ * open tab (or the Mac app) finds the board again and a second session can join the first.
+ * Private like the saves (0600); deleting it gives the next board a new token.
+ */
+export function readSession(dataDir) {
+  try {
+    const s = JSON.parse(readFileSync(path.join(dataDir, "token.json"), "utf8"));
+    return { token: TOKEN_RE.test(s?.token) ? s.token : null, port: Number.isInteger(s?.port) && s.port > 0 && s.port < 65536 ? s.port : null };
+  } catch {
+    return { token: null, port: null };
+  }
+}
+
+/**
+ * The key a board proves itself with on /api/ping: derived from its token, written in its lock
+ * (0600), and so known only to this user's sessions, the page and the Mac app. Whoever merely
+ * listens on the board's port cannot answer a ping's question, and so is never sent the token.
+ */
+export const pingKey = (token) => createHmac("sha256", token).update("math-board ping").digest("hex");
+export const pingProof = (key, nonce) => createHmac("sha256", key).update(nonce).digest("hex");
+const NONCE_RE = /^[A-Za-z0-9_-]{16,128}$/;
+
+/** The lock's owner if it is the board server that wrote the lock and answers on its port right now, else null. */
+async function answering(lock) {
+  if (!lock || !Number.isInteger(lock.port) || typeof lock.key !== "string") return null;
+  try {
+    const nonce = randomBytes(24).toString("hex");
+    const res = await fetch(`http://127.0.0.1:${lock.port}/api/ping?n=${nonce}`, { signal: AbortSignal.timeout(1500) });
+    const body = await res.json();
+    const want = Buffer.from(pingProof(lock.key, nonce));
+    const got = Buffer.from(String(body?.proof ?? ""));
+    return got.length === want.length && timingSafeEqual(got, want) ? lock : null;
+  } catch {
+    return null;
+  }
+}
 const firstLine = (err) => String(err?.message ?? err).split("\n")[0];
 
 /* ------------------------------------------------------------------ */
@@ -1233,8 +1614,16 @@ const firstLine = (err) => String(err?.message ?? err).split("\n")[0];
 /* ------------------------------------------------------------------ */
 
 export class BoardServer {
-  constructor({ dataDir, title, autosave = true, kind = "pi", html = htmlEnabled() } = {}) {
+  /**
+   * `exclusive`: one board per data folder. start() then fails with err.hosted = { pid, port }
+   * when another live board server owns the folder (see attach.mjs, which joins it instead).
+   */
+  constructor({ dataDir, title, autosave = true, kind = "pi", html = htmlEnabled(), exclusive = false } = {}) {
     this.dataDir = path.resolve(dataDir ?? defaultDataDir(kind));
+    this.exclusive = exclusive;
+    this.boxes = new Map(); // id -> { x, y, w, h }: where the layout check last measured each item (board coordinates)
+    this.learner = null; // what the learner's tab last reported about its view (see noteView)
+    this.tools = null; // (name, params, { signal, openHint }) => result: runs a model tool here for a session that joined
     this.html = html; // html artifacts allowed (MATH_BOARD_HTML=1)
     // Headless check of each html artifact's frame (by MAC): { state: "ok" | "failed" | "unchecked", reason? }.
     // A learner's page gets a frame only after the check page loaded it without hanging.
@@ -1291,12 +1680,113 @@ export class BoardServer {
   apply({ baseRevision, ...update }, { strict = true } = {}) {
     if (this.stopping || this.stopped) fail("this board server was stopped; call board_open to start the board again");
     if (baseRevision !== undefined) this.checkRevision(baseRevision);
-    const { board, warnings, touched } = applyUpdateReport(this.board, update, { strict, html: this.html });
+    const { board, warnings, touched } = applyUpdateReport(this.board, update, { strict, html: this.html, boxes: this.boxes });
     this.board = board;
     this.revision += 1;
+    for (const id of touched) this.boxes.delete(id); // changed since it was measured
     this.broadcast({ type: "revision", revision: this.revision });
     this.scheduleAutosave();
     return { revision: this.revision, warnings, touched };
+  }
+
+  /**
+   * Image artifacts arrive with `path`: a picture on the learner's disk. Each is checked (inside
+   * a folder the board may read, a real PNG, JPEG, GIF or WebP by its bytes, at most 8 MiB),
+   * copied to <dataDir>/images/<sha256>.<ext> and replaced by { file, natural } in a copy of the
+   * update, so the board and its saves never depend on the original staying where it was.
+   */
+  async ingestImages(update) {
+    const artifacts = update?.scene?.artifacts;
+    if (!Array.isArray(artifacts) || !artifacts.some((a) => a?.type === "image" && a.path !== undefined)) return update;
+    const roots = [];
+    for (const dir of imageDirs()) roots.push(await realpath(dir).catch(() => null));
+    const allowed = roots.filter(Boolean);
+    const out = [];
+    for (const [i, a] of artifacts.entries()) {
+      if (a?.type !== "image" || a.path === undefined) { out.push(a); continue; }
+      const where = `scene.artifacts[${i}]`;
+      if (a.file !== undefined || a.natural !== undefined) fail(`${where}: give path only (file and natural are the board's own)`);
+      if (typeof a.path !== "string" || !a.path || a.path.length > 1024) fail(`${where}: path must be the path of an image file`);
+      const asked = a.path.startsWith("~/") ? path.join(homedir(), a.path.slice(2)) : a.path;
+      if (!path.isAbsolute(asked)) fail(`${where}: path must be absolute (or start with ~/), got ${show(a.path)}`);
+      const within = (file) => allowed.some((root) => file === root || file.startsWith(root + path.sep));
+      const real = await realpath(asked).catch(() => null);
+      // Whether a file exists is only said for paths inside the allowed folders.
+      if (!real && (within(path.resolve(asked)) || imageDirs().some((root) => path.resolve(asked).startsWith(path.resolve(root) + path.sep)))) fail(`${where}: no file at ${a.path}`);
+      if (!real || !within(real))
+        fail(`${where}: ${a.path} is outside the folders this board may show images from (${imageDirs().join(", ") || "none"}). The learner can allow more with MATH_BOARD_IMAGE_DIRS.`);
+      const info = await stat(real);
+      if (!info.isFile() || info.size > MAX_IMAGE_BYTES) fail(`${where}: ${a.path} must be a file of at most ${MAX_IMAGE_BYTES / 1024 / 1024} MiB`);
+      const data = await readFile(real);
+      const kind = imageInfo(data);
+      if (!kind || !(kind.w > 0 && kind.h > 0)) fail(`${where}: ${a.path} is not a PNG, JPEG, GIF or WebP image`);
+      const file = `${createHash("sha256").update(data).digest("hex")}.${kind.ext}`;
+      const dir = path.join(this.dataDir, "images");
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      if (!(await stat(path.join(dir, file)).catch(() => null))) {
+        const temp = path.join(dir, `.${randomUUID()}.tmp`);
+        try {
+          await writeFile(temp, data, { mode: 0o600 });
+          await rename(temp, path.join(dir, file));
+        } finally {
+          await rm(temp, { force: true });
+        }
+      }
+      const { path: _path, ...rest } = a;
+      out.push({ ...rest, file, natural: [Math.min(kind.w, 65535), Math.min(kind.h, 65535)] });
+    }
+    return { ...update, scene: { ...update.scene, artifacts: out } };
+  }
+
+  /** Boxes a layout check measured at `revision`; kept only if the board has not changed since. */
+  noteBoxes(items, revision) {
+    if (revision !== this.revision || !Array.isArray(items)) return;
+    this.boxes = new Map(items.map((i) => [i.id, { x: i.x, y: i.y, w: i.w, h: i.h }]));
+  }
+
+  /**
+   * What the learner's tab says about its own view: the step it shows, the chapter in view,
+   * slider values, the item last clicked, the covers lifted. Never a change to the board and
+   * never a model turn: the tutor sees it in its next board_read. Only ids that exist, numbers
+   * and slider read-outs are kept (no free text).
+   */
+  noteView(raw) {
+    if (!raw || typeof raw !== "object") return;
+    const items = new Map(sceneItems(this.board).map((it) => [it.id, it]));
+    const int = (v) => (Number.isInteger(v) && v >= 0 && v <= 1e6 ? v : 0);
+    const sliders = {};
+    for (const [id, text] of Object.entries(raw.sliders && typeof raw.sliders === "object" ? raw.sliders : {}).slice(0, 20))
+      if (items.get(id)?.type === "plot" && typeof text === "string" && text.length <= 200 && /^[A-Za-z][A-Za-z0-9_]{0,15} = [\d.\u2212]{1,24}(, [A-Za-z][A-Za-z0-9_]{0,15} = [\d.\u2212]{1,24})*$/u.test(text)) sliders[id] = text;
+    this.learner = {
+      at: Date.now(),
+      step: int(raw.step),
+      steps: int(raw.steps),
+      live: raw.live !== false,
+      chapter: (this.board.chapters ?? []).some((c) => c.id === raw.chapter) ? raw.chapter : null,
+      sliders,
+      clicked: items.has(raw.clicked) ? raw.clicked : null,
+      uncovered: (Array.isArray(raw.uncovered) ? raw.uncovered : []).filter((id) => items.get(id)?.cover).slice(0, 100),
+    };
+  }
+
+  /** One line for board_read about the learner's view, or "" when no tab is open or none has reported. */
+  learnerLine() {
+    const v = this.learner;
+    if (!v || this.viewerCount() === 0) return "";
+    const items = new Map(sceneItems(this.board).map((it) => [it.id, it]));
+    const age = Math.round((Date.now() - v.at) / 1000);
+    const parts = [];
+    if (v.chapter && (this.board.chapters ?? []).some((c) => c.id === v.chapter)) parts.push(`looking at chapter ${v.chapter}`);
+    if (v.steps) parts.push(v.live || v.step >= v.steps ? `on the latest step (${v.steps})` : `stepped back to step ${v.step} of ${v.steps}`);
+    const sliders = Object.entries(v.sliders).filter(([id]) => items.has(id));
+    if (sliders.length) parts.push(`sliders ${sliders.map(([id, text]) => `${id}: ${text}`).join("; ")}`);
+    if (v.clicked && items.has(v.clicked)) parts.push(`last clicked ${v.clicked}`);
+    const covers = [...items.values()].filter((it) => it.cover).map((it) => it.id);
+    if (covers.length) {
+      const lifted = covers.filter((id) => v.uncovered.includes(id));
+      parts.push(lifted.length ? `uncovered ${lifted.join(", ")}${lifted.length < covers.length ? `; still covered ${covers.filter((id) => !lifted.includes(id)).join(", ")}` : ""}` : `has not uncovered ${covers.join(", ")}`);
+    }
+    return parts.length ? `learner's tab (${age < 90 ? `${age} s` : `${Math.round(age / 60)} min`} ago): ${parts.join(" · ")}` : "";
   }
 
   /** Throw a conflict error (err.conflict = { currentRevision }) unless baseRevision is the current revision. */
@@ -1348,7 +1838,7 @@ export class BoardServer {
   }
 
   async save(name = "default") {
-    if (!SAVE_NAME_RE.test(name)) fail(`invalid save name: ${JSON.stringify(name)} (letters, digits, . _ -; at most 64; not starting with a dot)`);
+    if (!SAVE_NAME_RE.test(name)) fail(`invalid save name: ${show(name)} (letters, digits, . _ -; at most 64; not starting with a dot)`);
     const payload = this.payload(name);
     const job = this.saveQueue.then(async () => {
       const dir = await this.savesDir();
@@ -1363,6 +1853,26 @@ export class BoardServer {
     });
     this.saveQueue = job.catch(() => {});
     return job;
+  }
+
+  /**
+   * A new board, started by the learner: the current one is saved under a name made from its
+   * title and today's date (kinetic-energy-2026-11-10, then -2, -3, ...), then cleared. Compare
+   * and swap on baseRevision, so what is saved is the board the learner was looking at. An empty
+   * board is left as it is. Returns { saved: name | null, revision }.
+   */
+  async fresh(baseRevision = this.revision) {
+    this.checkRevision(baseRevision);
+    const b = this.board;
+    if (!b.equations.length && !b.scene.shapes.length && !b.scene.artifacts?.length && !b.chapters?.length) return { saved: null, revision: this.revision };
+    const taken = new Set(await this.listSaves());
+    const slug = String(b.title ?? "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "");
+    const base = `${slug || "board"}-${new Date().toLocaleDateString("sv")}`;
+    let name = base;
+    for (let n = 2; taken.has(name); n++) name = `${base}-${n}`;
+    this.checkRevision(baseRevision); // save() takes the board as it is when called
+    await this.save(name);
+    return { saved: name, revision: this.update({ baseRevision, title: DEFAULT_TITLE, clear: ["all"] }) };
   }
 
   async listSaves() {
@@ -1402,7 +1912,7 @@ export class BoardServer {
    * { revision, dropped, skipped }: skipped describes what the save had that could not be used.
    */
   async load(name = "default", baseRevision = this.revision) {
-    if (!SAVE_NAME_RE.test(name)) fail(`invalid save name: ${JSON.stringify(name)}`);
+    if (!SAVE_NAME_RE.test(name)) fail(`invalid save name: ${show(name)}`);
     let payload;
     try {
       payload = await this.readBoardFile(path.join(this.dataDir, "saves", `${name}.json`));
@@ -1513,6 +2023,8 @@ export class BoardServer {
     try {
       const { update, dropped } = restoreOps(payload.board, { html: this.html });
       this.apply(update, { strict: false });
+      // Count on from the saved revision, so a tutor's next baseRevision still fits after a restart.
+      if (Number.isSafeInteger(payload.revision) && payload.revision > this.revision) this.revision = payload.revision;
       this.autosavedRevision = this.revision;
       this.restoredFrom = payload.savedAt;
       if (dropped) this.restoreNotice = `Restoring the autosave of ${payload.savedAt}: ${describeDropped(dropped)}.`;
@@ -1528,24 +2040,81 @@ export class BoardServer {
     return path.join(this.dataDir, "board.lock");
   }
 
-  /** Note another live board server on this data folder (it stays allowed; see notices()). */
+  /**
+   * Note another live board server on this data folder (it stays allowed; see notices()). A lock
+   * that is gone or whose owner is gone (a later board on this folder wrote its own and removed it
+   * when it stopped) is written again, so the next board still finds this one.
+   */
   checkLock() {
-    let lock;
+    let lock = null;
     try {
       lock = JSON.parse(readFileSync(this.lockFile, "utf8"));
-    } catch {
-      return;
-    }
-    if (!lock || lock.instance === this.instance) return;
-    const alive = lock.pid === process.pid ? LIVE.has(lock.instance) : pidAlive(lock.pid);
+    } catch {}
+    if (lock?.instance === this.instance) return;
+    const alive = lock && (lock.pid === process.pid ? LIVE.has(lock.instance) : pidAlive(lock.pid));
     if (alive) this.sharedWith = { pid: lock.pid, port: lock.port, started: lock.started, instance: lock.instance };
+    else if (this.server) this.writeLock();
   }
 
-  writeLock() {
+  writeLock(flag = "w") {
     try {
-      writeFileSync(this.lockFile, JSON.stringify({ pid: process.pid, port: this.port, started: this.startedAt, instance: this.instance }), { mode: 0o600 });
-    } catch {
+      writeFileSync(this.lockFile, JSON.stringify({ pid: process.pid, port: this.port, started: this.startedAt, instance: this.instance, key: pingKey(this.token) }), { mode: 0o600, flag });
+      return true;
+    } catch (err) {
       // An unwritable data folder shows up as a failed autosave.
+      return err?.code !== "EEXIST";
+    }
+  }
+
+  /** The other live board server that owns this data folder (it answers on its port), or null. */
+  async liveOwner() {
+    let lock = null;
+    try {
+      lock = JSON.parse(readFileSync(this.lockFile, "utf8"));
+    } catch {}
+    if (!lock || lock.instance === this.instance) return null;
+    if (lock.pid === process.pid) return LIVE.has(lock.instance) ? lock : null;
+    return pidAlive(lock.pid) ? answering(lock) : null;
+  }
+
+  /**
+   * Take the lock for an exclusive board: created only if no file is there, so of two servers
+   * starting at once exactly one gets it. A lock whose owner is gone is removed and taken.
+   * Returns the live owner when there is one (this server must not run), else null.
+   */
+  async claimLock() {
+    const text = () => {
+      try {
+        return readFileSync(this.lockFile, "utf8");
+      } catch {
+        return null;
+      }
+    };
+    for (let tries = 0; tries < 3; tries++) {
+      if (this.writeLock("wx")) {
+        // Another session that judged the old lock dead a moment ago may have replaced this one:
+        // look once more, and yield to it if so.
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        const now = text();
+        if (now !== null && now.includes(this.instance)) return null;
+        continue;
+      }
+      const seen = text();
+      const owner = await this.liveOwner();
+      if (owner) return owner;
+      // Remove only the lock just judged dead, not one a faster session put in its place.
+      try {
+        if (seen !== null && text() === seen) unlinkSync(this.lockFile);
+      } catch {}
+    }
+    return this.liveOwner();
+  }
+
+  writeSession() {
+    try {
+      writeFileSync(path.join(this.dataDir, "token.json"), JSON.stringify({ token: this.token, port: this.port }), { mode: 0o600 });
+    } catch {
+      // As with the lock: an unwritable data folder shows up as a failed autosave.
     }
   }
 
@@ -1569,6 +2138,12 @@ export class BoardServer {
   }
 
   async listen() {
+    await mkdir(this.dataDir, { recursive: true, mode: 0o700 }).catch(() => {});
+    const hosted = (owner) => Object.assign(new Error(`another board server (process ${owner.pid}, port ${owner.port}) hosts ${this.dataDir}`), { hosted: { pid: owner.pid, port: owner.port } });
+    if (this.exclusive) {
+      const owner = await this.liveOwner();
+      if (owner) throw hosted(owner);
+    }
     const server = http.createServer((req, res) => this.handle(req, res));
     // SSE keepalive + socket hygiene
     server.keepAliveTimeout = 5000;
@@ -1582,15 +2157,26 @@ export class BoardServer {
           resolve();
         });
       });
-    // Within one process, a board on the same data folder reuses the last token and port, so a
-    // tab left open across /reload or /board stop reconnects by itself.
+    // A board on the same data folder reuses its last token and port (token.json; within one
+    // process also across /reload), so a tab left open reconnects by itself and other sessions
+    // can join. $MATH_BOARD_PORT asks for a fixed port.
     const previous = SESSIONS.get(this.dataDir);
     const reuse = previous && ![...LIVE].some((id) => previous.owner === id);
+    // A second board on a folder whose first one still runs here keeps to itself: its own token and port.
+    const second = Boolean(previous) && !reuse;
+    const kept = second ? { token: null, port: null } : readSession(this.dataDir);
+    const fresh = this.token;
     if (reuse) this.token = previous.token;
+    else if (kept.token) this.token = kept.token;
+    const asked = Number(process.env.MATH_BOARD_PORT);
+    const port = Number.isInteger(asked) && asked > 0 && asked < 65536 ? asked : reuse ? previous.port : (kept.port ?? 0);
     try {
-      await bind(reuse ? previous.port : 0);
+      await bind(port);
     } catch (err) {
-      if (!reuse || err?.code !== "EADDRINUSE") throw err;
+      if (!port || !["EADDRINUSE", "EACCES", "EADDRNOTAVAIL"].includes(err?.code)) throw err;
+      // Something else has the board's port, and open tabs may be telling it the old token:
+      // this board gets a new one along with its new port.
+      this.token = fresh;
       await bind(0);
     }
     const addr = server.address();
@@ -1598,11 +2184,21 @@ export class BoardServer {
     this.url = `http://127.0.0.1:${addr.port}/#token=${this.token}`;
     this.server = server;
     this.startedAt = nowIso();
+    if (this.exclusive) {
+      const owner = await this.claimLock();
+      if (owner) {
+        this.server = this.port = this.url = null;
+        await new Promise((resolve) => server.close(resolve));
+        throw hosted(owner);
+      }
+    }
     LIVE.add(this.instance);
     SESSIONS.set(this.dataDir, { token: this.token, port: this.port, owner: this.instance });
-    await mkdir(this.dataDir, { recursive: true, mode: 0o700 }).catch(() => {});
-    this.checkLock();
-    this.writeLock();
+    if (!this.exclusive) {
+      this.checkLock(); // notes a live owner; a missing or dead one's lock becomes ours
+      this.writeLock();
+    }
+    if (!second) this.writeSession();
     await this.restoreAutosave();
     return this;
   }
@@ -1649,9 +2245,9 @@ export class BoardServer {
     }
   }
 
-  async readBody(req, res) {
+  async readBody(req, res, limit = MAX_BODY_BYTES) {
     const declared = Number(req.headers["content-length"] ?? 0);
-    if (declared > MAX_BODY_BYTES) {
+    if (declared > limit) {
       this.json(res, 413, { ok: false, error: "payload too large" });
       return null;
     }
@@ -1662,7 +2258,7 @@ export class BoardServer {
       req.on("data", (c) => {
         if (done) return;
         total += c.length;
-        if (total > MAX_BODY_BYTES) {
+        if (total > limit) {
           done = true;
           this.json(res, 413, { ok: false, error: "payload too large" });
           req.destroy();
@@ -1713,6 +2309,7 @@ export class BoardServer {
       "Content-Security-Policy",
       `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; frame-src ${this.html ? "'self'" : "'none'"}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`,
     );
+    const snapshot = req.headers[SNAPSHOT_HEADER] === "1";
     try {
       // Every route: exact loopback Host (DNS rebinding) and, when sent, the board's own Origin.
       if (req.headers.host !== `127.0.0.1:${this.port}`) return this.json(res, 403, { ok: false, error: "forbidden host" });
@@ -1723,12 +2320,30 @@ export class BoardServer {
       } catch {
         return this.json(res, 400, { ok: false, error: "malformed URL" });
       }
-      const snapshot = req.headers[SNAPSHOT_HEADER] === "1";
       // html artifact frames have an opaque origin ("null"); they may load only the libraries and fonts.
       const library = req.method === "GET" && /^\/(vendor|assets)\//.test(pathname);
       if (req.headers.origin !== undefined && !this.allowedOrigin(req.headers.origin) && !(library && req.headers.origin === "null"))
         return this.json(res, 403, { ok: false, error: "forbidden origin" });
       if (req.method === "GET" && pathname.startsWith("/frame/")) return this.serveFrame(res, pathname.slice("/frame/".length));
+      // An image artifact's file: its name is the SHA-256 of its content, which only the board's
+      // state (behind the token) tells, so the address itself is the key, as with html frames.
+      if (req.method === "GET" && pathname.startsWith("/images/")) {
+        const name = pathname.slice("/images/".length);
+        if (!IMAGE_FILE_RE.test(name)) return this.notFound(res);
+        try {
+          const data = await readFile(path.join(this.dataDir, "images", name));
+          res.writeHead(200, { "content-type": IMAGE_MIME[name.split(".")[1]], "cache-control": "private, max-age=31536000, immutable", "content-length": data.length });
+          return res.end(data);
+        } catch {
+          return this.notFound(res);
+        }
+      }
+      // Who answers here: lets a session that found this board's lock tell it from a stale one.
+      // The proof answers the caller's random question with the key in this board's lock (see pingKey).
+      if (req.method === "GET" && pathname === "/api/ping") {
+        const nonce = new URL(req.url, "http://127.0.0.1").searchParams.get("n");
+        return this.json(res, 200, { ok: true, name: "math-board", ...(NONCE_RE.test(nonce ?? "") && { proof: pingProof(pingKey(this.token), nonce) }) });
+      }
       // Static app routes (page load carries no auth yet; the app reads the token from the URL
       // fragment and sends it on every API call).
       if (req.method === "GET" && !pathname.startsWith("/api/")) {
@@ -1742,15 +2357,15 @@ export class BoardServer {
       if (pathname === "/api/events" && req.method === "GET") {
         // EventSource cannot set an Authorization header; this route takes the token as a query parameter.
         if (url.searchParams.get("token") !== this.token) return this.json(res, 401, { ok: false, error: "missing or invalid token" });
-        if (this.clients.size >= 32) return this.json(res, 429, { ok: false, error: "too many browser connections" });
+        if (!snapshot && this.viewerCount() >= 32) return this.json(res, 429, { ok: false, error: "too many browser connections" });
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
         res.write(`data: ${JSON.stringify({ type: "hello", revision: this.revision })}\n\n`);
         // The headless snapshot page marks its requests, so it is not counted as a viewer.
-        res.snapshot = req.headers[SNAPSHOT_HEADER] === "1";
+        res.snapshot = snapshot;
         this.clients.add(res);
         const ping = setInterval(() => {
           try {
-            res.write(": ping\n\n");
+            res.write('data: {"type":"ping"}\n\n'); // an event, not a comment: the page watches for it
           } catch {}
         }, 25000);
         ping.unref?.();
@@ -1768,16 +2383,41 @@ export class BoardServer {
         return this.json(res, 200, { ok: true, revision: this.revision, board: this.board, ...this.frames(snapshot) });
       }
       if (req.method === "GET" && pathname === "/api/saves") return this.json(res, 200, { ok: true, saves: await this.listSaves() });
+      if (req.method === "GET" && pathname === "/api/status") {
+        if (url.searchParams.get("warm") === "1") this.snapshots.warm(); // a joined session's board_open
+        return this.json(res, 200, { ok: true, ...this.status() });
+      }
 
       if (req.method === "POST") {
-        if (Number(req.headers["content-length"]) > MAX_BODY_BYTES) return this.json(res, 413, { ok: false, error: "payload too large" });
+        const limit = pathname === "/api/tool" ? MAX_TOOL_BODY_BYTES : MAX_BODY_BYTES;
+        if (Number(req.headers["content-length"]) > limit) return this.json(res, 413, { ok: false, error: "payload too large" });
         if (req.headers["content-type"]?.split(";")[0].trim() !== "application/json") return this.json(res, 415, { ok: false, error: "application/json required" });
-        const body = await this.readBody(req, res);
+        const body = await this.readBody(req, res, limit);
         if (body === null) return; // already answered (413/400)
-        if (["/api/update", "/api/clear", "/api/load"].includes(pathname) && !Number.isSafeInteger(body.baseRevision))
+        // Sessions that joined this board (attach.mjs): their model's tool calls run here, and
+        // their /board export asks for the images. A request the caller gave up on is cancelled.
+        // The learner's tab reports its view (never the headless page): see noteView.
+        if (pathname === "/api/view") {
+          if (!snapshot) this.noteView(body);
+          return this.json(res, 200, { ok: true });
+        }
+        if (pathname === "/api/tool" || pathname === "/api/snapshot") {
+          const gone = new AbortController();
+          res.on("close", () => { if (!res.writableEnded) gone.abort(); });
+          if (pathname === "/api/tool") {
+            if (!this.tools || typeof body.name !== "string") return this.json(res, 400, { ok: false, error: "no such tool here" });
+            const result = await this.tools(body.name, body.params ?? {}, { signal: gone.signal, openHint: typeof body.openHint === "string" ? body.openHint.slice(0, 80) : undefined });
+            return this.json(res, 200, { ok: true, result: { content: result.content, ...(result.isError && { isError: true }) } });
+          }
+          const r = body.region;
+          if (r !== undefined && !(r && [r.x, r.y, r.w, r.h].every(Number.isFinite) && r.w >= 10 && r.h >= 10)) return this.json(res, 400, { ok: false, error: "invalid region" });
+          const shot = await this.snapshots.capture({ region: r, width: Number.isFinite(body.width) ? body.width : undefined, signal: gone.signal });
+          return this.json(res, 200, { ok: true, revision: this.revision, png: shot.png.toString("base64"), lint: shot.lint });
+        }
+        if (["/api/update", "/api/clear", "/api/load", "/api/new"].includes(pathname) && !Number.isSafeInteger(body.baseRevision))
           return this.json(res, 400, { ok: false, error: "baseRevision is required" });
         const failed = (err, code = 400) => this.json(res, err.conflict ? 409 : code, { ok: false, error: String(err.message ?? err), revision: this.revision, board: this.board, ...this.frames(snapshot) });
-        const BODY_KEYS = { "/api/clear": keys("baseRevision", "scopes"), "/api/save": keys("baseRevision", "name"), "/api/load": keys("baseRevision", "name") };
+        const BODY_KEYS = { "/api/new": keys("baseRevision"), "/api/clear": keys("baseRevision", "scopes"), "/api/save": keys("baseRevision", "name"), "/api/load": keys("baseRevision", "name") };
         try {
           // A stale page gets the 409 first (with the current board, to re-read and ask again);
           // a save from the page's view must not save a board the learner has not seen.
@@ -1799,6 +2439,13 @@ export class BoardServer {
             try {
               this.update({ baseRevision: body.baseRevision, clear: body.scopes ?? ["all"] });
               return this.json(res, 200, { ok: true, revision: this.revision, board: this.board, ...this.frames(snapshot) });
+            } catch (err) {
+              return failed(err);
+            }
+          case "/api/new":
+            try {
+              const { saved, revision } = await this.fresh(body.baseRevision);
+              return this.json(res, 200, { ok: true, saved, revision, board: this.board, ...this.frames(snapshot) });
             } catch (err) {
               return failed(err);
             }
@@ -1824,15 +2471,35 @@ export class BoardServer {
       return this.notFound(res);
     } catch (err) {
       if (!res.headersSent) {
+        // Nothing above expected this error (the routes answer their own): say so, never hang.
         try {
-          this.json(res, err.conflict ? 409 : 400, { ok: false, error: String(err?.message ?? err), revision: this.revision, board: this.board, ...this.frames(snapshot) });
-        } catch {}
+          this.json(res, err?.conflict ? 409 : 500, { ok: false, error: String(err?.message ?? err), revision: this.revision });
+        } catch {
+          res.destroy();
+        }
       } else {
         try {
           res.end();
         } catch {}
       }
     }
+  }
+
+  /** What /board status shows, and what a joined session needs to open the board. */
+  status() {
+    return {
+      instance: this.instance,
+      pid: process.pid,
+      port: this.port,
+      revision: this.revision,
+      startedAt: this.startedAt,
+      restoredFrom: this.restoredFrom,
+      dataDir: this.dataDir,
+      html: this.html,
+      chapters: this.board.chapters?.length ?? 0,
+      viewers: this.viewerCount(),
+      notices: this.notices(),
+    };
   }
 
   allowedOrigin(origin) {
@@ -1957,12 +2624,32 @@ export class BoardServer {
   }
 }
 
-/** Open a URL in the default browser (best effort; macOS and Linux). */
+/**
+ * The command that shows the board to the learner: [program, ...arguments]. On macOS the Math
+ * Board app (app/build.sh --install puts it in ~/Applications) when it is installed, else the
+ * default browser. $MATH_BOARD_VIEWER decides otherwise: "browser" never uses the app, and a
+ * path ending in .app names the app to use.
+ */
+const APP_ID = "io.github.smdesai27.math-board"; // the app's bundle id (app/build.sh)
+export function viewerCommand(url, { plat = platform(), env = process.env, exists = existsSync, home = homedir() } = {}) {
+  if (plat !== "darwin") return ["xdg-open", url];
+  const wanted = env.MATH_BOARD_VIEWER;
+  if (wanted === "browser") return ["open", url];
+  const apps = wanted?.endsWith(".app") ? [wanted] : [path.join(home, "Applications", "Math Board.app"), "/Applications/Math Board.app"];
+  const app = apps.find((a) => exists(path.join(a, "Contents", "MacOS", "MathBoard")));
+  // A running app keeps its window and never sees the arguments; `open` brings it to the front
+  // and it reads the address openBrowser left in its preferences.
+  return app ? ["open", "-a", app, "--args", "--url", url] : ["open", url];
+}
+
+/** Show a board address to the learner: the Mac app or the default browser (best effort; macOS and Linux). */
 export async function openBrowser(url) {
-  const cmd = platform() === "darwin" ? "open" : "xdg-open";
+  const [cmd, ...args] = viewerCommand(url);
   try {
     const { execFile } = await import("node:child_process");
-    await new Promise((resolve, reject) => execFile(cmd, [url], { timeout: 10000 }, (err) => (err ? reject(err) : resolve())));
+    // For an app that already runs: the address goes where it looks when it is brought forward.
+    if (args[0] === "-a") await new Promise((resolve) => execFile("defaults", ["write", APP_ID, "lastURL", url], { timeout: 5000 }, () => resolve()));
+    await new Promise((resolve, reject) => execFile(cmd, args, { timeout: 10000 }, (err) => (err ? reject(err) : resolve())));
     return true;
   } catch {
     return false;

@@ -9,21 +9,25 @@
  *
  * The tools are the pi extension's tools: tools.mjs is the one implementation (schemas,
  * descriptions, handlers, board_docs text); this file is the MCP adapter, as index.ts is pi's.
- * It is a separate board: this process hosts its own BoardServer (server.mjs), started on
- * the first tool call that needs it, listening on 127.0.0.1 only, with its own data directory.
+ * The board is shared with every other session on the same data folder (attach.mjs): the first
+ * tool call that needs it joins the board a pi session, another MCP server or `pi-math-board
+ * serve` hosts, or, when there is none, hosts it here (a BoardServer on 127.0.0.1 only).
+ *
+ *   npx -y pi-math-board serve                 host the board with no agent, until Ctrl-C
+ *   npx -y pi-math-board watch                 show the board in this terminal pane (sixel graphics)
  *
  * Environment:
- *   MATH_BOARD_DATA_DIR      data folder (also read as PI_MATH_BOARD_DATA_DIR). Default: the mcp/
- *                            subfolder of the board's default data folder (.data/ in a checkout,
- *                            else ~/Library/Application Support/math-board, $XDG_STATE_HOME/math-board
- *                            or %LOCALAPPDATA%\math-board), apart from pi's, so the two never
- *                            overwrite each other's autosave
+ *   MATH_BOARD_DATA_DIR      data folder (also read as PI_MATH_BOARD_DATA_DIR). Default: .data/ in
+ *                            a checkout, else ~/Library/Application Support/math-board,
+ *                            $XDG_STATE_HOME/math-board or %LOCALAPPDATA%\math-board
+ *   MATH_BOARD_PORT          port to listen on when this process hosts (default: the last one used)
  *   MATH_BOARD_NO_BROWSER=1  board_open returns the URL without opening a browser
  *   MATH_BOARD_HTML=1        allow html artifacts (the model's own HTML and JavaScript, sandboxed)
  *
  * stdout carries JSON-RPC only; diagnostics go to stderr. No network beyond 127.0.0.1, no
- * telemetry. When the client disconnects (stdin closes) or on SIGINT, SIGTERM or SIGHUP the
- * board server stops: autosave flushed, headless browser closed, port released.
+ * telemetry. When the client disconnects (stdin closes) or on SIGINT, SIGTERM or SIGHUP a board
+ * hosted here stops: autosave flushed, headless browser closed, port released. Sessions that
+ * joined it host it again from the autosave on their next tool call.
  *
  * Dependencies: @modelcontextprotocol/server (v2, the SDK's current stable line). The input
  * schemas are mcp/schemas.json, generated from tools.mjs by `npm run build`, so no TypeBox is
@@ -33,8 +37,13 @@
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { BoardServer, defaultDataDir, openBrowser } from "../server.mjs";
-import { TOOLS, BOARD_TEACHING, handlers, openText, staleFiles, viewerCount } from "../tools.mjs";
+// `serve` hosts the board without an agent; `watch` shows it in a terminal pane. Neither returns.
+if (process.argv[2] === "serve") await (await import("../serve.mjs")).serve();
+if (process.argv[2] === "watch") await (await import("../watch.mjs")).watch();
+
+const { defaultDataDir, openBrowser } = await import("../server.mjs");
+const { TOOLS, BOARD_TEACHING, openText, staleFiles } = await import("../tools.mjs");
+const { BoardLink } = await import("../attach.mjs");
 
 // Anything printed to stdout would corrupt the JSON-RPC stream.
 for (const level of ["log", "info", "debug"]) console[level] = (...args) => console.error(...args);
@@ -55,24 +64,6 @@ async function need(specifier, why) {
 const { McpServer, fromJsonSchema } = await need("@modelcontextprotocol/server", "the MCP SDK");
 const { serveStdio } = await need("@modelcontextprotocol/server/stdio", "the MCP SDK");
 
-/* ------------------------------------------------------------------ */
-/* The board server: one per process, started lazily                   */
-/* ------------------------------------------------------------------ */
-
-let board = null;
-
-async function ensureServer() {
-  if (!board) board = new BoardServer({ dataDir: defaultDataDir("mcp") });
-  const s = board;
-  try {
-    await s.start();
-  } catch (error) {
-    if (board === s) board = null;
-    throw error;
-  }
-  return s;
-}
-
 const SELF = fileURLToPath(import.meta.url);
 const mtime = (file) => {
   try {
@@ -91,20 +82,23 @@ function staleWarning() {
     : "";
 }
 
-/** What the shared handlers need: the lazy server, the stale-source warning, how to get the URL. */
-const toolContext = { server: ensureServer, staleWarning, openHint: "board_open" };
+/* ------------------------------------------------------------------ */
+/* The board: hosted here or joined, on the first tool call that needs it */
+/* ------------------------------------------------------------------ */
+
+const link = new BoardLink({ dataDir: defaultDataDir(), context: { staleWarning, openHint: "board_open" } });
 
 /**
- * board_open: start the board and show it in the default browser, unless one already shows it.
- * The URL (with its token) goes into the result only when no browser shows the board.
+ * board_open: start (or join) the board and show it in the default browser, unless one already
+ * shows it. The URL (with its token) goes into the result only when no browser shows the board.
  */
 async function boardOpen() {
-  const s = await ensureServer();
-  const viewed = viewerCount(s) > 0;
-  const opened = process.env.MATH_BOARD_NO_BROWSER === "1" || viewed ? false : await openBrowser(s.url);
+  const { viewers, notices } = await link.status({ warm: true });
+  const viewed = viewers > 0;
+  const opened = process.env.MATH_BOARD_NO_BROWSER === "1" || viewed ? false : await openBrowser(link.url);
   return {
-    content: [{ type: "text", text: openText({ url: s.url, port: s.port, opened, viewed, staleWarning: staleWarning(), notices: s.notices() }) }],
-    details: { port: s.port, opened },
+    content: [{ type: "text", text: openText({ url: link.url, port: link.port, opened, viewed, staleWarning: staleWarning(), notices }) }],
+    details: { port: link.port, opened },
   };
 }
 
@@ -127,14 +121,14 @@ const inputSchema = (name) => schemas[name];
 async function callTool(name, params, extra) {
   try {
     // The client's cancellation reaches a running layout check or snapshot.
-    const result = name === "board_open" ? await boardOpen() : await handlers[name]({ ...toolContext, signal: extra?.mcpReq?.signal ?? extra?.signal }, params ?? {});
+    const result = name === "board_open" ? await boardOpen() : await link.call(name, params ?? {}, extra?.mcpReq?.signal ?? extra?.signal);
     return result.isError ? { content: result.content, isError: true } : { content: result.content };
   } catch (err) {
     return { content: [{ type: "text", text: String(err?.message ?? err) }], isError: true };
   }
 }
 
-/** One McpServer per connection (stdio has one); every instance shares this process's board. */
+/** One McpServer per connection (stdio has one); every instance shares the one board. */
 function createMcpServer() {
   const mcp = new McpServer({ name: "math-board", title: "Math board", version: VERSION }, { instructions: BOARD_TEACHING });
   for (const { name, label, description, annotations } of TOOLS) {
@@ -151,17 +145,15 @@ function createMcpServer() {
 
 let stopping = null;
 
-/** Stop the board server (flushes autosave, closes the headless browser) and exit. Idempotent. */
+/** Stop the board if it is hosted here (flushes autosave, closes the headless browser) and exit. Idempotent. */
 function shutdown(reason) {
   stopping ??= (async () => {
     setTimeout(() => process.exit(1), 5000).unref(); // never hang on a stuck browser
     try {
       await connection?.close();
     } catch {}
-    const s = board;
-    board = null;
     try {
-      await s?.stop();
+      await link.stop();
     } catch (err) {
       console.error(`math-board MCP: stopping the board server after ${reason}: ${err?.message ?? err}`);
     }
@@ -171,7 +163,14 @@ function shutdown(reason) {
 }
 
 process.on("unhandledRejection", (err) => console.error("math-board MCP: unhandled rejection:", err));
-const connection = serveStdio(createMcpServer, { onerror: (err) => console.error(`math-board MCP: ${err?.message ?? err}`) });
+const connection = serveStdio(createMcpServer, {
+  onerror: (err) => {
+    console.error(`math-board MCP: ${err?.message ?? err}`);
+    // A request line beyond the SDK's read buffer stops it reading for good: end the session
+    // (the client sees the exit) rather than stay alive and deaf.
+    if (/ReadBuffer exceeded/.test(String(err?.message))) shutdown("request too large").finally?.(() => {});
+  },
+});
 // The client closing our stdin ends the session (the MCP stdio binding): stop the board too.
 process.stdin.once("end", () => shutdown("stdin closed"));
 process.stdin.once("close", () => shutdown("stdin closed"));

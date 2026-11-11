@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
-import { mkdtemp, rm, stat, readdir } from "node:fs/promises";
+import { mkdtemp, rm, stat, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { BoardServer, emptyBoard, applyUpdate } from "../server.mjs";
@@ -203,4 +203,19 @@ test("title and field validation, scene limit, duplicate ids, transaction rollba
     () => applyUpdate(board, { scene: { mode: "replace", shapes } }),
     /too many/,
   );
+});
+
+test("an error no route expected gets an answer instead of a request that hangs", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "math-board-hardening-"));
+  await writeFile(path.join(dir, "saves"), "not a folder");
+  const s = new BoardServer({ dataDir: dir, autosave: false });
+  await s.start();
+  try {
+    const r = await fetch(`http://127.0.0.1:${s.port}/api/saves`, { headers: { authorization: `Bearer ${s.token}` }, signal: AbortSignal.timeout(3000) });
+    assert.equal(r.status, 500);
+    assert.match((await r.json()).error, /ENOTDIR/);
+  } finally {
+    await s.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
 });

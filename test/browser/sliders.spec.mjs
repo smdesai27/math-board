@@ -83,7 +83,8 @@ test("sliders redraw the plot live: drag, keys, a draggable point, play; nothing
   expect(errors).toEqual([]);
 });
 
-test("a click on the plot copies its reference with the learner's slider values", async ({ page, context }) => {
+test("a click on the plot copies its reference with the learner's slider values", async ({ page, context, browserName }) => {
+  test.skip(browserName === "webkit", "Playwright's WebKit can't grant clipboard permissions, so the clipboard can't be read back");
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(server.url).origin });
   const { g, track } = await fid(page);
   await track(1).focus();
@@ -112,6 +113,10 @@ test("each tab and the layout check see the tutor's values; a changed plot start
   expect(lint.issues).toEqual([]);
   const item = lint.items.find((i) => i.id === "fid");
   expect(item.y + item.h).toBeLessThanOrEqual(80 + 500 + 1);
+  // The tutor moves the plot: the learner's values stay as they set them.
+  server.update({ baseRevision: server.revision, items: [{ op: "move", id: "fid", dx: 20, dy: 10 }] });
+  await page.waitForFunction((rev) => window.__board.revision >= rev, server.revision);
+  expect(await params()).toBe("w = 6.0, T2 = 3.00");
   // The tutor sets a new value: every tab shows it, the learner's own change included.
   server.update({ baseRevision: server.revision, items: [{ op: "update", id: "fid", fields: { params: [{ ...FID.params[0], value: 1 }, FID.params[1]] } }] });
   await expect.poll(params).toBe("w = 1.0, T2 = 3.00");

@@ -65,7 +65,7 @@ export async function launchChromium(chromium) {
   const errors = [];
   for (const channel of [undefined, "chrome"]) {
     try {
-      return { browser: await chromium.launch({ headless: true, chromiumSandbox: true, ...(channel ? { channel } : {}) }), sandboxNote: null };
+      return { browser: await chromium.launch({ headless: true, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false, chromiumSandbox: true, ...(channel ? { channel } : {}) }), sandboxNote: null };
     } catch (err) {
       errors.push({ channel, err });
     }
@@ -73,7 +73,7 @@ export async function launchChromium(chromium) {
   const sandboxFailure = errors.find((e) => !isMissing(e.err));
   if (sandboxFailure) {
     try {
-      const browser = await chromium.launch({ headless: true, chromiumSandbox: false, ...(sandboxFailure.channel ? { channel: sandboxFailure.channel } : {}) });
+      const browser = await chromium.launch({ headless: true, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false, chromiumSandbox: false, ...(sandboxFailure.channel ? { channel: sandboxFailure.channel } : {}) });
       return {
         browser,
         sandboxNote: `the headless browser runs without Chromium's OS sandbox, which could not start here (${firstLine(sandboxFailure.err)}). The board's content is still shown as images only.`,
@@ -141,6 +141,8 @@ export class Snapshotter {
   }
 
   async ensurePage() {
+    // A call still running when the server stops must not start a browser for a board that is gone.
+    if (!this.server.url) throw new Error("the board server is stopped");
     this.touch();
     if (this.live) {
       if (this.pageStamp === assetStamp()) return this.page;
@@ -176,12 +178,17 @@ export class Snapshotter {
         page.on?.("close", () => {
           if (this.page === page) this.page = null;
         });
-        // Marks this page's requests (its SSE connection too), so it never counts as a viewer.
-        await page.setExtraHTTPHeaders?.({ [SNAPSHOT_HEADER]: "1" });
-        // nofollow: snapshots choose their own region instead of following the lesson camera.
-        await page.goto(`${this.server.url}&nofollow=1`, { waitUntil: "domcontentloaded" });
-        // Snapshots show the board only, without the hover chrome.
-        await page.addStyleTag({ content: HIDE_CHROME });
+        try {
+          // Marks this page's requests (its SSE connection too), so it never counts as a viewer.
+          await page.setExtraHTTPHeaders?.({ [SNAPSHOT_HEADER]: "1" });
+          // nofollow: snapshots choose their own region instead of following the lesson camera.
+          await page.goto(`${this.server.url}&nofollow=1`, { waitUntil: "domcontentloaded" });
+          // Snapshots show the board only, without the hover chrome.
+          await page.addStyleTag({ content: HIDE_CHROME });
+        } catch (err) {
+          await page.close?.().catch?.(() => {});
+          throw err;
+        }
         if (generation !== this.generation) {
           await page.close().catch(() => {});
           throw new Error("the board server stopped while the headless browser was starting");
@@ -332,8 +339,12 @@ export class Snapshotter {
     try {
       await this.waitReady(page, readyTimeout, Boolean(frame));
       // A layout check loads only the frame it checks: the others' slots are measured in the SVG.
+      const revision = this.server.revision;
       if (frame) await this.waitFrames(page, [frame], [frame]);
-      return await page.evaluate((b) => window.__boardLint(b), { x: 0, y: 0, ...BOARD });
+      const lint = await page.evaluate((b) => window.__boardLint(b), { x: 0, y: 0, ...BOARD });
+      // The measured boxes are what below, rightOf and arrows between items are placed from.
+      this.server.noteBoxes?.(lint?.items, revision);
+      return lint;
     } finally {
       await this.pauseFrames(page, true);
     }
@@ -380,6 +391,15 @@ export class Snapshotter {
         if (region) await page.evaluate((b) => window.__setView(0, 0, b.w, b.h), BOARD).catch(() => {});
       }
     }
+  }
+
+  /**
+   * Start the headless browser now, in the background, so the first layout check does not wait
+   * for it (board_open calls this). Failing is fine: the first real call reports why.
+   */
+  warm() {
+    if (this.live || this.launching) return;
+    this.run(() => this.ensurePage(), { timeout: LINT_TIMEOUT_MS, label: "headless browser start" }).catch(() => {});
   }
 
   /** Close the browser but keep working: the next call launches a new one. */

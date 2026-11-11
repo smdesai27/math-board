@@ -11,3 +11,13 @@
 #blackboard [data-control]{cursor:pointer}#blackboard .plot-drag{cursor:grab}#blackboard .plot-drag:active{cursor:grabbing}#blackboard [tabindex]:focus{outline:none}#blackboard .slider-track:focus-visible .knob,#blackboard .slider-play:focus-visible circle{stroke:#5fb3d9;stroke-width:3}
 #frames{position:fixed;inset:0;z-index:1;pointer-events:none;overflow:hidden}.html-frame{position:absolute;left:0;top:0;transform-origin:0 0;pointer-events:auto}.html-frame iframe{display:block;width:100%;height:100%;border:0;background:transparent;color-scheme:dark}.html-frame[data-error]{outline:1.5px dashed #ef6f6c}.html-frame[data-error]::after{content:attr(data-error);position:absolute;left:0;right:0;bottom:0;padding:3px 8px;background:#140c0cdd;color:#ef6f6c;font:12px ui-monospace,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
 .html-frame:empty{outline:none}.html-frame:empty::after{display:none}
+#overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.focus-veil{fill:#000;fill-opacity:.6;animation:veil-in .35s ease-out}@keyframes veil-in{from{fill-opacity:0}}
+#blackboard>g.covered{opacity:0!important}
+.focus-ring{fill:none;stroke:#f2c14e;stroke-width:2.5;vector-effect:non-scaling-stroke;animation:focus-pulse 1.5s ease-in-out infinite}.focus-ring.still{animation:none}
+@keyframes focus-pulse{0%,100%{stroke-opacity:.95}50%{stroke-opacity:.35}}
+.cover{pointer-events:all;cursor:pointer;outline:none}.cover rect{fill:#151515;stroke:#8a8578;stroke-width:1.5;stroke-dasharray:7 6;vector-effect:non-scaling-stroke;transition:stroke .15s}.cover text{fill:#8a8578;font-family:KaTeX_Main,Georgia,serif;font-style:italic;transition:fill .15s}
+.cover:hover rect,.cover:focus-visible rect{stroke:#f2c14e}.cover:hover text,.cover:focus-visible text{fill:#f2c14e}
+.static .focus-veil{animation:none}@media(prefers-reduced-motion:reduce){.focus-veil,.focus-ring{animation:none}}
+.table-math{display:flex;align-items:center;height:100%;padding:0 8px;color:#e8e3d9;line-height:1}
+@media(max-width:700px),(max-height:480px){#bar{top:5px;opacity:.5;font-size:12px}#bar-top{height:26px;gap:6px;padding:0 10px}#bar:not(.open) #board-title{display:none}#bar:not(.open):not(.note):has(#step-indicator:empty)[data-conn=connected]{opacity:.28}#nav-hint{display:none}#bar button{min-width:28px;height:26px;padding:0 6px}#toast{bottom:8px}}

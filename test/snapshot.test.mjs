@@ -71,7 +71,7 @@ function fakeChromium({ sandbox = true, page = () => fakePage(), launchDelay = 0
 test("Chromium launches with its sandbox; without one it falls back and says so", async () => {
   const sandboxed = fakeChromium();
   assert.equal((await launchChromium(sandboxed)).sandboxNote, null);
-  assert.deepEqual(sandboxed.launches, [{ headless: true, chromiumSandbox: true }]);
+  assert.deepEqual(sandboxed.launches, [{ headless: true, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false, chromiumSandbox: true }]); // the board stops the browser itself on a signal
 
   const noSandbox = fakeChromium({ sandbox: false });
   const { sandboxNote } = await launchChromium(noSandbox);
@@ -148,4 +148,64 @@ test("an aborted signal cancels the call", async () => {
   await assert.rejects(pending, { name: "AbortError" });
   await assert.rejects(snap.capture({ signal: AbortSignal.abort() }), { name: "AbortError" });
   await snap.close();
+});
+
+test("a call still running when the server stops does not start another page", async () => {
+  const srv = { url: "http://127.0.0.1:1/#token=x", revision: 0 };
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const chromium = fakeChromium({
+    page: () => {
+      const page = fakePage();
+      page.waitForFunction = async () => {
+        await gate;
+        throw new Error("page.waitForFunction: Target closed");
+      };
+      return page;
+    },
+  });
+  const snaps = new Snapshotter(srv, { chromium });
+  const call = snaps.lint();
+  await new Promise((r) => setTimeout(r, 10));
+  srv.url = null; // BoardServer#stop
+  release();
+  await assert.rejects(call, /the board server is stopped/);
+  assert.equal(chromium.launches.length, 1);
+  assert.equal(chromium.browsers[0].pages.length, 1);
+  await snaps.close();
+});
+
+test("a page that cannot load the board is closed, not left open", async () => {
+  let made;
+  const chromium = fakeChromium({
+    page: () => {
+      made = fakePage();
+      made.goto = async () => {
+        throw new Error("page.goto: net::ERR_CONNECTION_REFUSED");
+      };
+      return made;
+    },
+  });
+  const snaps = new Snapshotter(server, { chromium });
+  await assert.rejects(snaps.lint(), /ERR_CONNECTION_REFUSED/);
+  assert.equal(made.isClosed(), true);
+  await snaps.close();
+});
+
+test("warm starts the headless page once, in the background, and stays quiet when there is no browser", async () => {
+  const chromium = fakeChromium();
+  const snaps = new Snapshotter(server, { chromium });
+  snaps.warm();
+  snaps.warm();
+  await snaps.queue;
+  assert.equal(chromium.launches.length, 1);
+  assert.equal(snaps.live, true);
+  snaps.warm();
+  assert.deepEqual((await snaps.lint()).issues, ["lint ok"]);
+  assert.equal(chromium.browsers[0].pages.length, 1, "the first layout check uses the warm page");
+  await snaps.close();
+  const none = new Snapshotter(server, { chromium: { launch: async () => { throw new Error("Executable doesn't exist"); } } });
+  none.warm();
+  await none.queue; // no unhandled rejection
+  await assert.rejects(none.lint(), /no headless browser available/);
 });

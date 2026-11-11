@@ -55,18 +55,23 @@ export const BOARD_TEACHING = [
     "Call board_open to start it; that activates the other board tools.",
   "",
   "Draw when a visual helps: derivations, geometry and vectors, diagrams of processes, plots, molecules, anatomy, " +
-    "timelines, flowcharts and state machines, trees and maps. " +
+    "timelines, flowcharts and state machines, trees and maps, tables, code, data charts, images. " +
     "Do not draw trivial or purely verbal points; answer those in the terminal.",
   "",
   "Rhythm: read the board (board_read), draw one step (board_update), ask one check question in the terminal " +
     "and wait for the answer, then continue.",
   "",
-  "To show how something changes with a parameter, give the plot a slider (params) and ask the learner to move it.",
+  "To show how something changes with a parameter, give the plot a slider (params) and ask the learner to move it. " +
+    "Point at what is drawn with focus instead of redrawing it. " +
+    "For a prediction, add the answer with cover:true and ask before they uncover it.",
   "",
   "Keep one concept per chapter: start a new chapter for a new concept and use the camera to move the learner there. " +
     "Keep board text short (labels, key equations, a few words) and put the explanation in the terminal.",
   "",
-  "Before you use an artifact type (plot, svg, mermaid, molecule, icon) for the first time, call board_docs for its format.",
+  "The learner decides when a new board starts. If the board holds an unrelated earlier lesson, ask before drawing on it; " +
+    "never clear it yourself.",
+  "",
+  "Before you use an artifact type for the first time, call board_docs for its format.",
   "",
   'The learner may refer to the board as "step 4, eq2": that is a step number and an item id. ' +
     "Read the board to find what they mean before you answer. Give items short ids (eq1, f2) so such references stay easy.",
@@ -87,6 +92,10 @@ export const DOC_TOPICS = Object.freeze([
   "mermaid",
   "molecule",
   "icon",
+  "table",
+  "code",
+  "chart",
+  "image",
   "html",
   "animation",
   "layout",
@@ -101,17 +110,21 @@ const ARTIFACT_COMMON =
 export const BOARD_DOCS = Object.freeze({
   overview: [
     "The blackboard is a view-only browser page the learner watches; you change it only through tools.",
-    "Tools: board_read (revision, chapters, camera, layout of one chapter), board_update (draw and edit; one call = one lesson step), " +
+    "Tools: board_read (revision, chapters, camera, the learner's view, layout of one chapter), board_update (draw and edit; one call = one lesson step), " +
       "board_snapshot (PNG of what the learner sees plus measured boxes), board_library (search ~2000 offline science illustrations), " +
       "board_save (named snapshots), board_docs (this reference).",
     "What you can draw, by topic:",
     "- equations: KaTeX math, \\color, \\boxed, \\cancel, chemistry with \\ce{...}",
     "- marks: lines, arrows, freehand curves, rectangles, ellipses, text",
-    "- plot: function graphs, parametric curves, shaded areas, points, asymptotes, and sliders the learner drags or plays (params)",
+    "- plot: function graphs, parametric curves, shaded areas, points, asymptotes, vectors and segments in the plot's coordinates, and sliders the learner drags or plays (params)",
     "- svg: hand-written SVG diagrams (markers, gradients, symbols, CSS, SMIL animation)",
     "- mermaid: flowcharts, sequence, state, class and ER diagrams, mind maps, timelines (automatic layout)",
     "- molecule: 2D structures from SMILES",
     "- icon: anatomy, organs, cells, microbes, viruses, DNA, plants, animals, lab equipment",
+    "- table: rows and columns of text, numbers or math, with highlighted rows, columns or cells (truth tables, comparisons, matrices, an algorithm's state)",
+    "- code: a listing in a monospace font with line numbers and highlighted lines",
+    "- chart: bar charts and histograms from data",
+    "- image: a picture file from the learner's disk (a figure from their slides, a micrograph, a scan)",
     "- html: your own HTML and JavaScript in a sandbox (3D scenes, simulations), only on boards started with MATH_BOARD_HTML=1",
     "Style (black board, chalk colors; keep it consistent): chalk white #e8e3d9 for main lines and text, muted #8a8578 for axes and guides; " +
       "accents yellow #f2c14e, blue #5fb3d9, red #ef6f6c, green #8de0be, purple #c39bd3; at most 3-4 accents per diagram.",
@@ -122,17 +135,22 @@ export const BOARD_DOCS = Object.freeze({
     "1. board_read: note the revision, the chapter list and the free space in the chapter you are teaching.",
     "2. board_update with baseRevision = that revision. Build the explanation in small updates, one idea per update: " +
       "each update that adds items is one lesson step, drawn live for the learner and replayable step by step.",
-    "3. The result gives the new revision (your next baseRevision) and a measured layout check: this update's warnings first, then a count of " +
+    "3. The result gives the new revision (your next baseRevision), what the update added or changed with each item's drawn box (measured, in the " +
+      "item's own coordinates: use it to place the next item beside or below), and a measured layout check: this update's warnings first, then a count of " +
       "older ones. Fix every warning (overlap, outside its chapter, failed to render) with items ops: {op:\"move\", id, dx, dy}, " +
       "{op:\"update\", id, fields:{...}} (type cannot change), {op:\"delete\", id}.",
     "Invalid input (an unknown field, a wrong type, an empty text, a bad id) is rejected with the reason and nothing is applied: fix it and resend.",
     "4. After significant changes call board_snapshot to see the board as the learner does (chapter or region to zoom in).",
     "Conflicts: a conflict means the board changed since your read (the learner loaded a save or cleared it, or another call landed). " +
       "Call board_read and re-apply your intended change against the current revision; never resend a stale replace or delete blindly.",
-    "Ids: items get random ids unless you pass a short id (1-64 characters) when adding them, e.g. \"eq1\", \"force\". " +
+    "Ids: an item added without an id gets a short one from its type (eq1, text2, arrow1, plot1); pass your own (1-64 characters) when a name says more, e.g. \"force\". " +
       "Ids are unique across shapes, artifacts and equations. Short ids make later edits and the learner's references (\"step 4, eq2\") easy.",
     "Order inside one update: title, clear ([\"equations\"|\"scene\"|\"all\"]; all also removes chapters), chapters, equations, scene, items, camera.",
     "check:false skips the layout check (faster for a burst of small edits; check again at the end).",
+    "Pointing: focus:[\"eq2\"] (up to 8 ids) rings those items and dims the rest of the board, with nothing drawn; it lasts until your next board_update. " +
+      "Use it while you talk about a term, then go on.",
+    "The learner: board_read ends with what their tab shows (the chapter in view, whether they stepped back, the slider values they set, the item they " +
+      "last clicked, the covers they lifted). It is their view, not a message: read it before you ask or answer.",
   ].join("\n"),
 
   chapters: [
@@ -167,7 +185,8 @@ export const BOARD_DOCS = Object.freeze({
   marks: [
     "scene:{mode:\"append\", shapes:[...]} draws vector marks. mode \"replace\" swaps the whole scene (all shapes and artifacts): use append unless you mean that.",
     "- line: {type:\"line\", points:[[x1,y1],[x2,y2],...], color?, width? (default 2)}",
-    "- arrow: {type:\"arrow\", points: 2-4 points; the last segment gets the arrowhead, color?, width?}",
+    "- arrow: {type:\"arrow\", points: 2-4 points; the last segment gets the arrowhead, color?, width?}, or between two items: " +
+      "{type:\"arrow\", from:\"eq1\", to:\"p1\"} runs from the edge of one to the edge of the other (gap? px clear of each, default 8)",
     "- stroke: {type:\"stroke\", points:[[x,y],...], color?, width? (default 3)}: freehand polyline; give many points for a smooth curve",
     "- rect: {type:\"rect\", x, y, w, h, color? (stroke), fill? (default none)}; x,y = top-left",
     "- ellipse: {type:\"ellipse\", x, y, w, h, color?, fill?}; x,y = top-left of its bounding box",
@@ -182,16 +201,19 @@ export const BOARD_DOCS = Object.freeze({
 
   plot: [
     "{type:\"plot\", x, y, width, height, xRange:[a,b] (default [-10,10]), yRange?:[c,d] (default: fitted), params?, functions?, parametric?, areas?, points?, " +
-      "vlines?, hlines?, xLabel?, yLabel?, title?, grid?, axes?, ticks? (all true by default; false hides), equalAspect? (true = same scale on both axes, for circles and geometry)}",
+      "vlines?, hlines?, vectors?, segments?, xLabel?, yLabel?, title?, grid?, axes?, ticks? (all true by default; false hides), equalAspect? (true = same scale on both axes, for circles and geometry)}",
     "- functions: up to 12 of {expr:\"sin(x)\", label?, color?, dash?, width?, domain?:[a,b]}",
     "- parametric: up to 8 of {x:\"cos(t)\", y:\"sin(t)\", t:[0,6.283] (default [0, 2pi]), label?, color?, dash?, width?}",
     "- areas: up to 6 of {expr, from, to, lower?:\"expr\"}: shades between expr and lower (default the x axis)",
     "- points: up to 200 of {x, y, label?, color?, size?}; vlines / hlines: up to 12 of {x} / {y} with label?, color?, dash? (asymptotes, markers)",
-    "At least one of functions, parametric, points or areas is required. Curves are traced (default reveal \"draw\").",
+    "- vectors: up to 24 of {from:[x,y], to:[x,y], label?, color?, width?, dash?}: an arrow in the plot's own coordinates (a force, a field, a velocity, " +
+      "a displacement), so it sits on the axes it belongs to; segments: the same without a head (a radius, a side of a triangle, a construction line). " +
+      "For geometry and vector diagrams set equalAspect:true and give xRange and yRange.",
+    "At least one of functions, parametric, points, areas, vectors or segments is required. Curves are traced (default reveal \"draw\").",
     "Sliders: params, up to 6 of {name, min, max, value? (default min), step?, label?, period? (seconds per sweep when played, default 4)}. " +
       "Each is a row under the plot that the learner drags, or plays with its ▶ button (min to max and back), and the plot redraws live. " +
       "A name (\"a\", \"omega\"; not x, t, a constant or a function) can be used in every expression of the plot, and as a point, vline or hline coordinate " +
-      "or an area's from/to: {x:\"a\", y:\"sin(a)\"}, {expr:\"sin(x)\", from:0, to:\"a\"}. A point with drag:true whose x and/or y is just a slider name can be dragged, " +
+      "or an area's from/to, or a vector's or segment's ends: {x:\"a\", y:\"sin(a)\"}, {expr:\"sin(x)\", from:0, to:\"a\"}, {from:[0,0], to:[\"cos(a)\",\"sin(a)\"]}. A point with drag:true whose x and/or y is just a slider name can be dragged, " +
       "which moves that slider. Each slider row takes 34 px of the plot's height (a height too small to leave a plot is rejected with the size needed). The fitted y range covers every slider's ends, or give yRange. " +
       "Snapshots, other tabs and board_read show each slider at its value; when the learner clicks the plot, the reference they copy includes their values.",
     "Expressions: numbers, the variable x (t in parametric), + - * / ^ (or **), unary minus, parentheses, implicit multiplication (2x, 3(x+1), 2pi), " +
@@ -255,6 +277,49 @@ export const BOARD_DOCS = Object.freeze({
     "CC-BY icons need attribution if the material is published (public/icons/CREDITS.md).",
   ].join("\n"),
 
+  table: [
+    "{type:\"table\", x, y, rows:[[cell, ...], ...], header?:[head, ...], highlight?, align?, size?, width?, height?}: 1-40 rows of 1-12 cells, every row the same length.",
+    "- A cell is text (at most 120 characters) or a number; a cell written \"$...$\" is typeset as math (KaTeX): \"$x^2$\", \"$\\\\frac12$\".",
+    "- header: the column heads, drawn in yellow italics above a rule.",
+    "- highlight: up to 60 of {row?, col?, color?}: row alone shades that row (0 = the first row under the header), col alone that column, both one cell. " +
+      "Shade the row an algorithm is on, the column being compared, the cell that changed; change it later with {op:\"update\", id, fields:{highlight:[...]}}.",
+    "- align: left, center (default) or right. size: font px (default 20; it shrinks so the longest cell fits its column; text too long even then is cut with an ellipsis).",
+    "- Without width and height the table takes about 130 px a column and 44 px a row. Default reveal \"wipe\" (\"fade\" with math cells).",
+    ARTIFACT_COMMON,
+    'Example: {"type":"table","id":"tt","x":80,"y":140,"header":["p","q","$p \\\\land q$"],"rows":[["T","T","T"],["T","F","F"],["F","T","F"],["F","F","F"]],"highlight":[{"row":0}]}',
+  ].join("\n"),
+
+  code: [
+    "{type:\"code\", x, y, source, language?, highlight?, lineNumbers?, size?, width?, height?}: a listing in a monospace font, at most 80 lines and 6000 characters. " +
+      "Nothing is run and nothing is syntax-coloured: show the part you are teaching, not a whole file.",
+    "- highlight: line numbers (from 1) to mark with a yellow band, e.g. the line a loop is on; move it with {op:\"update\", id, fields:{highlight:[4]}} as you step through.",
+    "- language: a short tag shown in the corner (\"python\"). lineNumbers:false hides the numbers. size: font px (default 17; it shrinks so the longest line fits).",
+    "- Without width and height the box fits the listing. Point at a line from outside with an arrow or text placed rightOf the listing.",
+    ARTIFACT_COMMON,
+    'Example: {"type":"code","id":"bs","x":60,"y":120,"language":"python","highlight":[3],"source":"lo, hi = 0, len(a) - 1\\nwhile lo <= hi:\\n    mid = (lo + hi) // 2\\n    if a[mid] < x: lo = mid + 1\\n    else: hi = mid - 1"}',
+  ].join("\n"),
+
+  chart: [
+    "{type:\"chart\", kind:\"bar\"|\"histogram\", x, y, width, height, title?, xLabel?, yLabel?, yRange?:[low,high], color?}",
+    "- bar: bars: 1-40 of {label, value, color?}; the value is written above each bar (showValues:false hides it). Negative values hang below the axis.",
+    "- histogram: values: 2-5000 numbers, binned by the board; bins? (2-60; default from the count of values), range?:[low,high] (default the data's own).",
+    "Use a plot for functions and a chart for data. Default reveal \"wipe\".",
+    ARTIFACT_COMMON,
+    'Example: {"type":"chart","id":"c1","kind":"bar","x":620,"y":120,"width":460,"height":320,"yLabel":"count","bars":[{"label":"A","value":12},{"label":"B","value":7},{"label":"O","value":20,"color":"#ef6f6c"}]}',
+    'Example: {"type":"chart","id":"h1","kind":"histogram","x":60,"y":120,"width":460,"height":320,"xLabel":"height (cm)","bins":8,"values":[158,162,165,165,168,170,171,171,173,175,176,178,181,184,190]}',
+  ].join("\n"),
+
+  image: [
+    "{type:\"image\", x, y, width?, height?, path}: a PNG, JPEG, GIF or WebP file on the learner's disk, at most 8 MiB: a figure from their slides, a micrograph, " +
+      "a photo of the apparatus, a scan of their notes. path is absolute or starts with ~/.",
+    "The board copies the file into its own data folder, so the lesson keeps working if the original moves. It reads only from the folders the learner allows " +
+      "(their learning folder by default; MATH_BOARD_IMAGE_DIRS for more) and says which when a path is outside them: ask the learner then, do not guess other paths.",
+    "Give width or height, not both, to keep the picture's aspect ratio (neither: 360 wide). Add arrows and text marks on top to point at its parts, and focus to point at the whole.",
+    "You cannot see the picture from its path: call board_snapshot of its chapter before you describe or annotate it.",
+    ARTIFACT_COMMON,
+    'Example: {"type":"image","id":"fig3","path":"~/Learn/histology/liver-lobule.png","x":60,"y":110,"width":520}',
+  ].join("\n"),
+
   html: [
     "{type:\"html\", x, y, width, height, source, libs?}: your own HTML and JavaScript, for what a plot (with params for sliders), svg or " +
       "mermaid cannot show: a 3D scene the learner turns (a Bloch sphere, field lines), a simulation, a custom interactive diagram. " +
@@ -299,6 +364,8 @@ export const BOARD_DOCS = Object.freeze({
       "form the next step.",
     "Emphasis uses the same machinery: an ellipse with reveal \"draw\" circles a term; a translucent rect (fill \"#f2c14e33\", color \"none\") with reveal " +
       "\"wipe\" highlights it; \\color and \\boxed work in LaTeX.",
+    "cover:true on any item hides it behind a panel with a question mark until the learner clicks it: draw the question, add the answer covered, " +
+      "ask for a prediction in the terminal, and let them look. board_read says which covers they lifted; {op:\"update\", id, fields:{cover:false}} lifts one for everyone.",
     "SVG artifacts may also contain SMIL animation (animate, animateTransform, animateMotion), which loops inside the drawing.",
   ].join("\n"),
 
@@ -310,6 +377,10 @@ export const BOARD_DOCS = Object.freeze({
     "Sizes: text 18-28 px, headings 30-36 px; equation size 1 is about 27 px; artifacts default to 360x280 (width 80-1200, height 60-800).",
     "Spacing: leave 40 px margins inside a chapter and generous whitespace; put labels next to (not on top of) what they name. " +
       "A derivation column on the left and the diagram on the right works well.",
+    "Next to another item: instead of x,y give below:\"id\" (left edges aligned, 24 px under it) or rightOf:\"id\" (tops aligned, 24 px to its right), " +
+      "with gap? for another distance; an x or y you also give wins for that axis. Works when adding equations, text, rects, ellipses and artifacts. " +
+      "The position is worked out once, from the other item's measured box, and stored as plain x,y (the result shows it); the new item joins the other's chapter. " +
+      "The box is exact for anything drawn by an earlier update; for an item added in the same call (earlier in it) it is an estimate.",
     "Layering: z orders items of every kind (default 0; higher draws on top); opacity 0-1.",
     "Checks: every board_update result reports measured overlaps (text and equations, artifacts), items spilling out of their chapter and " +
       "artifacts that failed to render. board_snapshot returns each item's measured box in board coordinates (subtract the chapter origin for local ones).",
@@ -367,7 +438,8 @@ export const TOOLS = Object.freeze([
       "`baseRevision` = the revision from your last board_read or board_update (compare-and-swap); on a conflict, board_read again and re-apply your change to the current board, never retry blindly. " +
       "Invalid input is rejected with the reason and nothing is applied. " +
       "Each result lists layout warnings (overlaps, items outside their chapter, failed renders): fix them with `items`. " +
-      "Items also take id (short, e.g. \"eq1\"), z, opacity, dash, chapter, step, reveal, duration, order. " +
+      "Items also take id (short, e.g. \"eq1\"), z, opacity, dash, chapter, step, reveal, duration, order, cover; " +
+      "below or rightOf (an item id) place one next to another instead of x,y. " +
       "Formats and examples: board_docs.",
   },
   {
@@ -400,7 +472,7 @@ export const TOOLS = Object.freeze([
     label: "Board reference",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description:
-      "Reference for the blackboard: artifact formats with examples (plot, svg, mermaid, molecule, icon), marks, equations, chapters and camera, animation, layout and style, saves. Call it before using a format for the first time.",
+      "Reference for the blackboard: artifact formats with examples (plot, svg, mermaid, molecule, icon, table, code, chart, image), marks, equations, chapters and camera, animation, layout and style, saves. Call it before using a format for the first time.",
   },
 ].map((tool) => Object.freeze(tool)));
 
@@ -426,6 +498,13 @@ export function buildSchemas(Type) {
   // Closed objects: a misplaced or misspelled field is a validation error, never silently ignored.
   const Closed = (properties, options) => Type.Object(properties, { additionalProperties: false, ...options });
 
+  // Placement next to another item, instead of x,y (board_docs layout).
+  const Beside = {
+    below: Type.Optional(Type.String()),
+    rightOf: Type.Optional(Type.String()),
+    gap: Type.Optional(Type.Number()),
+  };
+
   const EquationOpSchema = Type.Union([
     Closed({
       op: Type.Literal("add"),
@@ -434,6 +513,8 @@ export function buildSchemas(Type) {
       label: Type.Optional(Type.String()),
       x: Type.Optional(Type.Number({ description: "Omit x,y for auto layout" })),
       y: Type.Optional(Type.Number()),
+      ...Beside,
+      cover: Type.Optional(Type.Boolean()),
       color: Type.Optional(Type.String()),
       size: Type.Optional(Type.Number()),
       z: Type.Optional(Type.Number()),
@@ -474,6 +555,7 @@ export function buildSchemas(Type) {
     reveal: Type.Optional(Reveal),
     duration: Type.Optional(Type.Number()),
     order: Type.Optional(Type.Number()),
+    cover: Type.Optional(Type.Boolean()),
   };
   const Style = { ...TextStyle, dash: Type.Optional(Type.String()) };
 
@@ -488,8 +570,9 @@ export function buildSchemas(Type) {
     Closed({
       type: Type.Literal("rect"),
       ...Style,
-      x: Type.Number(),
-      y: Type.Number(),
+      ...Beside,
+      x: Type.Optional(Type.Number()),
+      y: Type.Optional(Type.Number()),
       w: Type.Number(),
       h: Type.Number(),
       color: Type.Optional(Type.String()),
@@ -498,8 +581,9 @@ export function buildSchemas(Type) {
     Closed({
       type: Type.Literal("ellipse"),
       ...Style,
-      x: Type.Number(),
-      y: Type.Number(),
+      ...Beside,
+      x: Type.Optional(Type.Number()),
+      y: Type.Optional(Type.Number()),
       w: Type.Number(),
       h: Type.Number(),
       color: Type.Optional(Type.String()),
@@ -515,7 +599,10 @@ export function buildSchemas(Type) {
     Closed({
       type: Type.Literal("arrow"),
       ...Style,
-      points: Type.Array(PointSchema, { minItems: 2, maxItems: 4, description: "Last segment gets the head" }),
+      points: Type.Optional(Type.Array(PointSchema, { minItems: 2, maxItems: 4, description: "Last segment gets the head" })),
+      from: Type.Optional(Type.String({ description: "from, to: item ids instead of points" })),
+      to: Type.Optional(Type.String()),
+      gap: Type.Optional(Type.Number()),
       color: Type.Optional(Type.String()),
       width: Type.Optional(Type.Number()),
     }),
@@ -523,8 +610,9 @@ export function buildSchemas(Type) {
       type: Type.Literal("text"),
       ...TextStyle,
       text: Type.String(),
-      x: Type.Number(),
-      y: Type.Number({ description: "Baseline" }),
+      ...Beside,
+      x: Type.Optional(Type.Number()),
+      y: Type.Optional(Type.Number({ description: "Baseline" })),
       size: Type.Optional(Type.Number()),
       font: Type.Optional(Type.Union([Type.Literal("serif"), Type.Literal("sans"), Type.Literal("mono")])),
       anchor: Type.Optional(Type.Union([Type.Literal("start"), Type.Literal("middle"), Type.Literal("end")])),
@@ -584,6 +672,7 @@ export function buildSchemas(Type) {
     items: Type.Optional(
       Type.Array(ItemOpSchema),
     ),
+    focus: Type.Optional(Type.Array(Type.String(), { maxItems: 8, description: "Item ids to point at" })),
     check: Type.Optional(Type.Boolean()),
     scene: Type.Optional(
       Closed({
@@ -594,7 +683,7 @@ export function buildSchemas(Type) {
         artifacts: Type.Optional(
           Type.Array(Type.Record(Type.String(), Type.Unknown()), {
             maxItems: 100,
-            description: "{type: plot|svg|mermaid|molecule|icon, x, y, width, height, ...}: see board_docs",
+            description: "{type: plot|svg|mermaid|molecule|icon|table|code|chart|image, x, y, width, height, ...}: see board_docs",
           }),
         ),
       }),
@@ -657,6 +746,66 @@ export function buildSchemas(Type) {
 /* Board summary for the model                                         */
 /* ------------------------------------------------------------------ */
 
+/** The items of a board, each marked with its kind (and an equation with where it sits). */
+function boardItems(board) {
+  const legacy = legacyEquationPositions(board?.equations);
+  return [
+    ...(board?.scene?.artifacts ?? []).map((it) => ({ ...it, _kind: "artifact" })),
+    ...(board?.equations ?? []).map((it) => ({ ...it, _kind: "equation", _at: legacy.get(it) ?? [it.x, it.y] })),
+    ...(board?.scene?.shapes ?? []).map((it) => ({ ...it, _kind: "shape" })),
+  ];
+}
+
+/** One item as a line of a layout listing: id, type, stored position and size, what it shows. */
+function itemLine(it, where = "", frameStates = {}) {
+  const r = (n) => (typeof n === "number" ? Math.round(n) : "?");
+  if (it.cover) where += " [covered]";
+  if (it._kind === "artifact")
+    return `  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.width)}x${r(it.height)}${it.label ? ` "${it.label}"` : ""}${it.source ? ` (${it.source.length} chars)` : ""}` +
+      `${it.params?.length ? ` sliders: ${it.params.map((p) => `${p.name}=${p.value} in [${p.min}, ${p.max}]`).join(", ")}` : ""}${it.libs?.length ? ` libs: ${it.libs.join(", ")}` : ""}${where}` +
+      `${frameStates[it.id]?.state === "checking" ? " [checking]" : frameStates[it.id]?.state === "failed" ? ` [${frameStates[it.id].reason}]` : ""}`;
+  if (it._kind === "equation") return `  [${it.id}] equation at (${r(it._at[0])},${r(it._at[1])}) ${it.label ? `${it.label}: ` : ""}${String(it.latex).slice(0, 80)}${where}`;
+  if (it.points?.length) {
+    const xs = it.points.map((p) => p[0]), ys = it.points.map((p) => p[1]);
+    return `  [${it.id}] ${it.type} bbox (${r(Math.min(...xs))},${r(Math.min(...ys))})-(${r(Math.max(...xs))},${r(Math.max(...ys))})${where}`;
+  }
+  if (it.type === "text") return `  [${it.id}] text at (${r(it.x)},${r(it.y)}) "${String(it.text).slice(0, 40)}"${where}`;
+  return `  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.w)}x${r(it.h)}${where}`;
+}
+
+const MAX_LISTED_CHANGES = 40;
+
+/**
+ * What one update changed, for its result: a line per item it added or changed, with the box the
+ * layout check measured for it (in its chapter's coordinates, like the item's own x,y), the ids it
+ * removed, and one line on where the board stands. The whole layout stays a board_read away, so a
+ * long lesson does not repeat its chapter in every result.
+ */
+export function summarizeChange(board, touched, removed = [], measured = [], frameStates = {}) {
+  const chapters = new Map((board?.chapters ?? []).map((c) => [c.id, c]));
+  const items = new Map(boardItems(board).map((it) => [it.id, it]));
+  const boxes = new Map(measured.map((m) => [m.id, m]));
+  const lines = [];
+  for (const id of touched) {
+    const it = items.get(id), c = chapters.get(id);
+    if (it) {
+      const origin = chapters.get(it.chapter) ?? { x: 0, y: 0 };
+      const m = boxes.get(id);
+      lines.push(itemLine(it, (it.chapter ? ` {${it.chapter}}` : "") + (it.step ? ` s${it.step}` : ""), frameStates) + (m ? ` · drawn box ${m.x - Math.round(origin.x)},${m.y - Math.round(origin.y)} ${m.w}x${m.h}` : ""));
+    } else if (c) lines.push(`  [${c.id}] chapter "${c.title}" at (${Math.round(c.x)},${Math.round(c.y)}) ${Math.round(c.w)}x${Math.round(c.h)}`);
+  }
+  const cam = board?.camera;
+  const out = [];
+  if (lines.length) out.push(`added or changed (${lines.length}):`, ...lines.slice(0, MAX_LISTED_CHANGES), ...(lines.length > MAX_LISTED_CHANGES ? [`  ... ${lines.length - MAX_LISTED_CHANGES} more`] : []));
+  if (board?.focus?.length) out.push(`pointing at: ${board.focus.join(", ")} (until your next board_update)`);
+  if (removed.length) out.push(`removed (${removed.length}): ${removed.slice(0, MAX_LISTED_CHANGES).join(", ")}${removed.length > MAX_LISTED_CHANGES ? ", ..." : ""}`);
+  out.push(
+    `board: ${chapters.size} chapter${chapters.size === 1 ? "" : "s"}, ${items.size} item${items.size === 1 ? "" : "s"}` +
+      `${board?.lastStep ? `, ${board.lastStep} step${board.lastStep === 1 ? "" : "s"}` : ""}, camera: ${cam ? (cam.chapter ? `chapter ${cam.chapter}` : "a rect") : "home"}. board_read lists the whole layout.`,
+  );
+  return out.join("\n");
+}
+
 /**
  * Text summary for the model. With chapters, prints a table of contents and
  * the detailed layout of one chapter only (focus; default = camera chapter),
@@ -668,12 +817,7 @@ export function buildSchemas(Type) {
  */
 export function summarizeBoard(board, focus, frameStates = {}) {
   const chapters = board?.chapters ?? [];
-  const legacy = legacyEquationPositions(board?.equations);
-  const all = [
-    ...(board?.scene?.artifacts ?? []).map((it) => ({ ...it, _kind: "artifact" })),
-    ...(board?.equations ?? []).map((it) => ({ ...it, _kind: "equation", _at: legacy.get(it) ?? [it.x, it.y] })),
-    ...(board?.scene?.shapes ?? []).map((it) => ({ ...it, _kind: "shape" })),
-  ];
+  const all = boardItems(board);
   const camChapter = board?.camera?.chapter;
   const f = focus ?? (chapters.length ? camChapter ?? chapters[chapters.length - 1]?.id : "all");
   const lines = [`title: ${board?.title ?? ""}`];
@@ -690,22 +834,7 @@ export function summarizeBoard(board, focus, frameStates = {}) {
   if (board?.lastStep) lines.push(`steps: ${board.lastStep} (the next board_update adds step ${board.lastStep + 1})`);
   lines.push(`camera: ${cam ? (cam.chapter ? `chapter ${cam.chapter}` : `rect ${Math.round(cam.x)},${Math.round(cam.y)} ${Math.round(cam.w)}x${Math.round(cam.h)}`) : `home (0,0 ${CHAPTER.w}x${CHAPTER.h})`}`);
   const shown = f === "all" ? all : all.filter((it) => (it.chapter ?? null) === (f === "free" ? null : f));
-  const r = (n) => (typeof n === "number" ? Math.round(n) : "?");
-  const items = [];
-  for (const it of shown) {
-    const where = (it.chapter && f === "all" ? ` {${it.chapter}}` : "") + (it.step ? ` s${it.step}` : "");
-    if (it._kind === "artifact")
-      items.push(`  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.width)}x${r(it.height)}${it.label ? ` "${it.label}"` : ""}${it.source ? ` (${it.source.length} chars)` : ""}` +
-        `${it.params?.length ? ` sliders: ${it.params.map((p) => `${p.name}=${p.value} in [${p.min}, ${p.max}]`).join(", ")}` : ""}${it.libs?.length ? ` libs: ${it.libs.join(", ")}` : ""}${where}` +
-        `${frameStates[it.id]?.state === "checking" ? " [checking]" : frameStates[it.id]?.state === "failed" ? ` [${frameStates[it.id].reason}]` : ""}`);
-    else if (it._kind === "equation")
-      items.push(`  [${it.id}] equation at (${r(it._at[0])},${r(it._at[1])}) ${it.label ? `${it.label}: ` : ""}${String(it.latex).slice(0, 80)}${where}`);
-    else if (it.points?.length) {
-      const xs = it.points.map((p) => p[0]), ys = it.points.map((p) => p[1]);
-      items.push(`  [${it.id}] ${it.type} bbox (${r(Math.min(...xs))},${r(Math.min(...ys))})-(${r(Math.max(...xs))},${r(Math.max(...ys))})${where}`);
-    } else if (it.type === "text") items.push(`  [${it.id}] text at (${r(it.x)},${r(it.y)}) "${String(it.text).slice(0, 40)}"${where}`);
-    else items.push(`  [${it.id}] ${it.type} at (${r(it.x)},${r(it.y)}) ${r(it.w)}x${r(it.h)}${where}`);
-  }
+  const items = shown.map((it) => itemLine(it, (it.chapter && f === "all" ? ` {${it.chapter}}` : "") + (it.step ? ` s${it.step}` : ""), frameStates));
   const scope = f === "all" ? "whole board" : f === "free" ? "free items" : `chapter ${f}`;
   lines.push(`layout of ${scope} (${shown.length} items${chapters.length && f !== "all" ? "; pass chapter to board_read for another" : ""}):`);
   lines.push(...items.slice(0, 200));
@@ -748,7 +877,7 @@ export function openText({ url, port, opened, viewed, activationError, staleWarn
   const shown = opened
     ? `The board is open in the learner's browser (${where}).`
     : viewed
-      ? `The board is already open in a browser (${where}).`
+      ? `The board is already open (${where}).`
       : `Board: ${url} (not opened automatically; give the learner this URL).`;
   return [
     staleWarning,
@@ -838,7 +967,9 @@ export const handlers = Object.freeze({
       ...s.notices(),
       `The board is running on 127.0.0.1:${s.port}.${s.restoredFrom ? ` (Restored from the autosave of ${s.restoredFrom}.)` : ""}`,
       summarizeBoard(board, focus, frameStatesOf(s)),
+      board.focus?.length ? `focus (you are pointing at): ${board.focus.join(", ")}` : "",
       `revision: ${s.revision}`,
+      typeof s.learnerLine === "function" ? s.learnerLine() : "",
       sceneDetail
         ? `scene detail:\n${sceneDetail.length > 24000 ? sceneDetail.slice(0, 24000) + "\n[Truncated. Use board_save then read the saved JSON for the complete scene.]" : sceneDetail}`
         : "",
@@ -857,9 +988,12 @@ export const handlers = Object.freeze({
     const s = await ctx.server();
     // Everything except the tool's own fields goes to the server unchanged: it validates every
     // field and rejects what it cannot use with the reason, so nothing is dropped silently.
-    const { baseRevision, check, ...update } = params;
+    const { baseRevision, check, ...given } = params;
+    // Image artifacts name a file on disk: it is checked and copied into the data folder first.
+    const update = typeof s.ingestImages === "function" ? await s.ingestImages(given) : given;
     let result;
     const before = s.revision;
+    const idsBefore = boardItems(s.board).map((it) => it.id);
     try {
       result = s.apply({ baseRevision, ...update });
     } catch (err) {
@@ -878,18 +1012,25 @@ export const handlers = Object.freeze({
       };
     }
     const { revision, warnings, touched } = result;
+    // Read now, before anything is awaited: a parallel call may change the board meanwhile, and
+    // this result describes the revision it names.
+    const board = s.getState();
     // Write the autosave now, so a failure is reported with this update.
     await s.flushAutosave().catch(() => {});
+    const idsAfter = new Set(boardItems(board).map((it) => it.id));
+    const removed = idsBefore.filter((id) => !idsAfter.has(id));
     let layout = warnings.length ? updateWarnings(warnings, [], touched) : "";
+    let measured = [];
     if (check !== false) {
       try {
         const lint = await s.snapshots.lint({ signal: ctx.signal });
         layout = updateWarnings(warnings, lint.issues, touched);
+        // The boxes are of the board as it is now; they belong in this result only if no later update has landed.
+        if (s.revision === revision) measured = lint.items ?? [];
       } catch (e) {
         layout = [layout, e?.name === "AbortError" ? "layout check cancelled." : `layout check unavailable: ${String(e.message).split("\n")[0]}`].filter(Boolean).join("\n");
       }
     }
-    const board = s.getState();
     return {
       content: [
         {
@@ -901,7 +1042,7 @@ export const handlers = Object.freeze({
             layout,
             checkingLine(s),
             ...snapshotNotes(s),
-            summarizeBoard(board, undefined, frameStatesOf(s)),
+            summarizeChange(board, touched, removed, measured, frameStatesOf(s)),
             viewerLine(ctx, s),
           ]
             .filter(Boolean)
@@ -918,7 +1059,7 @@ export const handlers = Object.freeze({
     let region = params.region;
     if (!region && params.chapter) {
       const c = (board.chapters ?? []).find((ch) => ch.id === params.chapter);
-      if (!c) throw new Error(`unknown chapter "${params.chapter}"`);
+      if (!c) throw new Error(`unknown chapter "${String(params.chapter).slice(0, 64)}"`);
       region = chapterRegion(c);
     }
     // Region helpers are shared with /board export, so its PNGs match these snapshots.
@@ -959,7 +1100,7 @@ export const handlers = Object.freeze({
     const hits = searchIcons(params.query ?? "", { category: params.category, limit: params.limit ?? 25 });
     const text = hits.length
       ? hits.map((i) => `  ${i.id} — ${i.name} · ${i.category} · ${i.license} · aspect ${(i.w / i.h).toFixed(2)}`).join("\n") + "\nPlace with {type:'icon', icon:'<id>', x, y, width} (credit: public/icons/CREDITS.md)."
-      : `No icons match "${params.query}". Try fewer or broader words, or call with no query for categories.`;
+      : `No icons match ${JSON.stringify(String(params.query ?? params.category ?? "").slice(0, 60))}. Try fewer or broader words, or call with no query for categories.`;
     return { content: [{ type: "text", text }], details: { results: hits } };
   },
 

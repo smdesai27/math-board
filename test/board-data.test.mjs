@@ -195,6 +195,15 @@ test("a second board on the same data folder is named in notices; the lock goes 
   assert.match(a.notices().join("\n"), new RegExp(`port ${b.port}`));
   await b.stop();
   assert.deepEqual(a.notices(), [], "the warning ends with the other board");
+  // The newcomer took the lock and removed it when it stopped: the first board writes its own
+  // again at its next autosave, so a third board still finds it.
+  a.update({ title: "b" });
+  await a.flushAutosave();
+  assert.equal((await read(path.join(dir, "board.lock"))).instance, a.instance);
+  const c = new BoardServer({ dataDir: dir });
+  await c.start();
+  assert.match(c.notices().join("\n"), new RegExp(`port ${a.port}`));
+  await c.stop();
   await a.stop();
   await assert.rejects(readFile(path.join(dir, "board.lock")), /ENOENT/);
 });
@@ -254,6 +263,14 @@ test("strict input: unknown fields, wrong types and bad ids are rejected with th
   bad({ items: [{ op: "move", id: "nope", dx: 1, dy: 1 }] }, /unknown item id/);
   // The lenient path (old saves) drops what it does not know instead.
   assert.equal(applyUpdate(b, { scene: { mode: "append", shapes: [{ type: "rect", x: "5", y: 0, w: 1, h: 1, extra: 1 }] } }, { strict: false }).scene.shapes[0].x, 0);
+});
+
+test("ids and titles carry no control characters (they reach the clipboard and a terminal status line)", () => {
+  assert.throws(() => applyUpdate(emptyBoard(), { equations: [{ op: "add", id: "a\nb", latex: "x" }] }, { strict: true }), /id/);
+  assert.throws(() => applyUpdate(emptyBoard(), { equations: [{ op: "add", id: "a\u001b]52;c;x", latex: "x" }] }, { strict: true }), /id/);
+  const board = applyUpdate(emptyBoard(), { title: "Lesson\u001b]0;x\u0007", chapters: [{ op: "add", id: "c1", title: "One\u009b2J" }] }, { strict: true });
+  assert.equal(board.title, "Lesson ]0;x ");
+  assert.equal(board.chapters[0].title, "One 2J");
 });
 
 test("ids are unique across shapes, artifacts and equations", () => {
@@ -351,4 +368,43 @@ test("moving a plot moves its box, not its data points", () => {
   b = applyUpdate(b, { scene: { mode: "append", shapes: [{ type: "line", id: "l", points: [[0, 0], [10, 10]] }] } });
   b = applyUpdate(b, { items: [{ op: "move", id: "l", dx: 1, dy: 2 }] });
   assert.deepEqual(b.scene.shapes[0].points, [[1, 2], [11, 12]]);
+});
+
+test("a new board: the old one is saved under its title and date, then cleared; an empty board is left alone", async () => {
+  const dir = await tempDir();
+  const s = new BoardServer({ dataDir: dir });
+  await s.start();
+  try {
+    assert.deepEqual(await s.fresh(), { saved: null, revision: 0 });
+    const today = new Date().toLocaleDateString("sv");
+    s.update({ title: "Énergie cinétique!", equations: [{ op: "add", id: "ke", latex: "E" }] });
+    await assert.rejects(s.fresh(0), /conflict/, "the board the learner saw is the one that is saved");
+    assert.deepEqual(await s.fresh(1), { saved: `energie-cinetique-${today}`, revision: 2 });
+    assert.equal(s.getState().equations.length, 0);
+    assert.equal(s.getState().title, "Blackboard");
+    assert.equal((await read(path.join(dir, "saves", `energie-cinetique-${today}.json`))).board.equations[0].id, "ke");
+    // The same title again on the same day gets its own name; a board without a usable title too.
+    s.update({ title: "Énergie cinétique!", chapters: [{ op: "add", id: "c", title: "C" }] });
+    assert.equal((await s.fresh()).saved, `energie-cinetique-${today}-2`);
+    s.update({ title: "∑", equations: [{ op: "add", latex: "x" }] });
+    assert.equal((await s.fresh()).saved, `board-${today}`);
+    // Loading the save brings the lesson back.
+    await s.load(`energie-cinetique-${today}`);
+    assert.equal(s.getState().title, "Énergie cinétique!");
+  } finally {
+    await s.stop();
+  }
+});
+
+test("the board opens in the Math Board app when it is installed, else in the browser", async () => {
+  const { viewerCommand } = await import("../server.mjs");
+  const url = "http://127.0.0.1:5000/#token=x";
+  const mac = (env, installed) => viewerCommand(url, { plat: "darwin", env, home: "/Users/me", exists: (p) => installed.some((a) => p === `${a}/Contents/MacOS/MathBoard`) });
+  assert.deepEqual(mac({}, []), ["open", url]);
+  assert.deepEqual(mac({}, ["/Users/me/Applications/Math Board.app", "/Applications/Math Board.app"]), ["open", "-a", "/Users/me/Applications/Math Board.app", "--args", "--url", url]);
+  assert.deepEqual(mac({}, ["/Applications/Math Board.app"]), ["open", "-a", "/Applications/Math Board.app", "--args", "--url", url]);
+  assert.deepEqual(mac({ MATH_BOARD_VIEWER: "browser" }, ["/Applications/Math Board.app"]), ["open", url]);
+  assert.deepEqual(mac({ MATH_BOARD_VIEWER: "/opt/Board.app" }, ["/opt/Board.app", "/Applications/Math Board.app"]), ["open", "-a", "/opt/Board.app", "--args", "--url", url]);
+  assert.deepEqual(mac({ MATH_BOARD_VIEWER: "/opt/Missing.app" }, ["/Applications/Math Board.app"]), ["open", url], "a named app that is not there falls back to the browser");
+  assert.deepEqual(viewerCommand(url, { plat: "linux", env: {}, exists: () => true }), ["xdg-open", url]);
 });
