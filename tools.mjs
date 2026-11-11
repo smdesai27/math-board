@@ -283,7 +283,7 @@ export const BOARD_DOCS = Object.freeze({
     "- header: the column heads, drawn in yellow italics above a rule.",
     "- highlight: up to 60 of {row?, col?, color?}: row alone shades that row (0 = the first row under the header), col alone that column, both one cell. " +
       "Shade the row an algorithm is on, the column being compared, the cell that changed; change it later with {op:\"update\", id, fields:{highlight:[...]}}.",
-    "- align: left, center (default) or right. size: font px (default 20; it shrinks so the longest cell fits its column).",
+    "- align: left, center (default) or right. size: font px (default 20; it shrinks so the longest cell fits its column; text too long even then is cut with an ellipsis).",
     "- Without width and height the table takes about 130 px a column and 44 px a row. Default reveal \"wipe\" (\"fade\" with math cells).",
     ARTIFACT_COMMON,
     'Example: {"type":"table","id":"tt","x":80,"y":140,"header":["p","q","$p \\\\land q$"],"rows":[["T","T","T"],["T","F","F"],["F","T","F"],["F","F","F"]],"highlight":[{"row":0}]}',
@@ -1100,7 +1100,7 @@ export const handlers = Object.freeze({
     const hits = searchIcons(params.query ?? "", { category: params.category, limit: params.limit ?? 25 });
     const text = hits.length
       ? hits.map((i) => `  ${i.id} — ${i.name} · ${i.category} · ${i.license} · aspect ${(i.w / i.h).toFixed(2)}`).join("\n") + "\nPlace with {type:'icon', icon:'<id>', x, y, width} (credit: public/icons/CREDITS.md)."
-      : `No icons match "${params.query}". Try fewer or broader words, or call with no query for categories.`;
+      : `No icons match ${JSON.stringify(String(params.query ?? params.category ?? "").slice(0, 60))}. Try fewer or broader words, or call with no query for categories.`;
     return { content: [{ type: "text", text }], details: { results: hits } };
   },
 

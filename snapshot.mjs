@@ -65,7 +65,7 @@ export async function launchChromium(chromium) {
   const errors = [];
   for (const channel of [undefined, "chrome"]) {
     try {
-      return { browser: await chromium.launch({ headless: true, chromiumSandbox: true, ...(channel ? { channel } : {}) }), sandboxNote: null };
+      return { browser: await chromium.launch({ headless: true, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false, chromiumSandbox: true, ...(channel ? { channel } : {}) }), sandboxNote: null };
     } catch (err) {
       errors.push({ channel, err });
     }
@@ -73,7 +73,7 @@ export async function launchChromium(chromium) {
   const sandboxFailure = errors.find((e) => !isMissing(e.err));
   if (sandboxFailure) {
     try {
-      const browser = await chromium.launch({ headless: true, chromiumSandbox: false, ...(sandboxFailure.channel ? { channel: sandboxFailure.channel } : {}) });
+      const browser = await chromium.launch({ headless: true, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false, chromiumSandbox: false, ...(sandboxFailure.channel ? { channel: sandboxFailure.channel } : {}) });
       return {
         browser,
         sandboxNote: `the headless browser runs without Chromium's OS sandbox, which could not start here (${firstLine(sandboxFailure.err)}). The board's content is still shown as images only.`,

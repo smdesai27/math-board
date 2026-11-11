@@ -98,10 +98,13 @@ export class BoardSync {
  * same token reconnects the tab by itself. States: connecting, connected, reconnecting, stopped.
  * With `quietAfter`, a stream that delivers nothing for that long (the server pings well within
  * it) counts as dropped: a connection can die without the browser reporting an error.
+ * With `check` (async, resolves true or false), a stream that dropped is reopened only once the
+ * check passes: the page uses it to make sure the board, not another program on its port, is
+ * what answers before it sends the token again.
  */
 export class LiveEvents {
-  constructor({ open, onEvent, onState, stoppedAfter = 10000, backoff = [500, 1000, 2000, 4000, 5000], quietAfter = 0 }) {
-    Object.assign(this, { open, onEvent, onState, stoppedAfter, backoff, quietAfter });
+  constructor({ open, onEvent, onState, stoppedAfter = 10000, backoff = [500, 1000, 2000, 4000, 5000], quietAfter = 0, check = null }) {
+    Object.assign(this, { open, onEvent, onState, stoppedAfter, backoff, quietAfter, check });
     this.quietTimer = 0;
     this.state = "connecting";
     this.source = null;
@@ -122,6 +125,13 @@ export class LiveEvents {
     this.onState(state);
   }
   connect() {
+    if (this.closed) return;
+    if (!this.outage || !this.check) return this.listen();
+    Promise.resolve()
+      .then(() => this.check())
+      .then((ok) => (ok ? this.listen() : this.failed(null)), () => this.failed(null));
+  }
+  listen() {
     if (this.closed) return;
     let source;
     try {

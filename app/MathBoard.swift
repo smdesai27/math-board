@@ -20,6 +20,7 @@
 
 import Cocoa
 import WebKit
+import CryptoKit
 
 // MARK: - Finding the board
 
@@ -58,13 +59,18 @@ func defaultDataDir() -> String {
 }
 
 /// Where to look, in order: --url, --data-dir, the address given last time, the default data folder.
-func resolveURL() -> URL? {
-    if let url = boardURL(argument("--url")) { return url }
-    if let dir = argument("--data-dir") { return discover(in: dir) }
-    if let dir = defaults.string(forKey: "dataDir"), let url = discover(in: dir) { return url }
-    if let url = boardURL(defaults.string(forKey: "lastURL")) { return url }
-    return discover(in: defaultDataDir())
+/// Several may be known; the first whose server answers is shown.
+func candidateURLs() -> [URL] {
+    if let url = boardURL(argument("--url")) { return [url] }
+    if let dir = argument("--data-dir") { return [discover(in: dir)].compactMap { $0 } }
+    var found: [URL] = []
+    if let dir = defaults.string(forKey: "dataDir"), let url = discover(in: dir) { found.append(url) }
+    if let url = boardURL(defaults.string(forKey: "lastURL")), !found.contains(url) { found.append(url) }
+    if let url = discover(in: defaultDataDir()), !found.contains(url) { found.append(url) }
+    return found
 }
+
+func resolveURL() -> URL? { candidateURLs().first }
 
 // MARK: - The window
 
@@ -134,35 +140,52 @@ final class BoardController: NSObject, NSApplicationDelegate, WKUIDelegate, WKNa
         return true
     }
 
-    /// Show the board if its server answers; otherwise say what to do and look again every 2 s.
+    /// Show the first known board whose server answers; otherwise say what to do and look again
+    /// every 2 s.
     func connect() {
         retry?.invalidate()
-        url = resolveURL()
-        guard let url = url else {
+        let known = candidateURLs()
+        guard !known.isEmpty else {
+            url = nil
             show("No board found.\n\nAsk the tutor to open the board (board_open, or /board in pi), then choose View > Reload.")
             retry = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in self?.connect() }
             return
         }
+        tryBoard(known[...])
+    }
+
+    func tryBoard(_ known: ArraySlice<URL>) {
+        guard let url = known.first else {
+            show("The board isn't running.\n\nIt starts when the tutor opens it (board_open, or /board in pi).\nThis window connects by itself.")
+            retry = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in self?.connect() }
+            return
+        }
+        // Only the board can answer the question (see pingKey in server.mjs); a program that
+        // merely listens on its port is not shown and never sees the token.
+        func hmac(_ key: String, _ message: String) -> String {
+            HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: SymmetricKey(data: Data(key.utf8))).map { String(format: "%02x", $0) }.joined()
+        }
+        let token = String((url.fragment ?? "").dropFirst("token=".count).prefix(64))
+        let nonce = (0..<24).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
+        let proof = hmac(hmac(token, "math-board ping"), nonce)
         var ping = URLComponents(url: url, resolvingAgainstBaseURL: false)!
         ping.fragment = nil
         ping.path = "/api/ping"
+        ping.queryItems = [URLQueryItem(name: "n", value: nonce)]
         var request = URLRequest(url: ping.url!)
         request.timeoutInterval = 1.5
         URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
             let body = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                if body?["name"] as? String == "math-board" {
-                    if argument("--url") != nil { defaults.set(url.absoluteString, forKey: "lastURL") }
-                    self.placeholder.isHidden = true
-                    self.web.isHidden = false
-                    // A snapshot shows the board at rest (the page's static mode: nothing mid-fade).
-                    let shown = self.snapshotFile == nil ? url : URL(string: url.absoluteString + "&static=1") ?? url
-                    self.web.load(URLRequest(url: shown))
-                } else {
-                    self.show("The board isn't running.\n\nIt starts when the tutor opens it (board_open, or /board in pi).\nThis window connects by itself.")
-                    self.retry = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in self?.connect() }
-                }
+                guard body?["name"] as? String == "math-board", body?["proof"] as? String == proof else { return self.tryBoard(known.dropFirst()) }
+                self.url = url
+                if argument("--url") != nil { defaults.set(url.absoluteString, forKey: "lastURL") }
+                self.placeholder.isHidden = true
+                self.web.isHidden = false
+                // A snapshot shows the board at rest (the page's static mode: nothing mid-fade).
+                let shown = self.snapshotFile == nil ? url : URL(string: url.absoluteString + "&static=1") ?? url
+                self.web.load(URLRequest(url: shown))
             }
         }.resume()
     }
@@ -178,7 +201,7 @@ final class BoardController: NSObject, NSApplicationDelegate, WKUIDelegate, WKNa
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         let to = action.request.url
-        let own = to?.scheme == "http" && to?.host == "127.0.0.1" && to?.port == url?.port
+        let own = url != nil && to?.scheme == "http" && to?.host == "127.0.0.1" && to?.port == url?.port
         // An html artifact's frame may load about:blank and srcdoc documents inside itself.
         let inner = action.targetFrame?.isMainFrame == false && (to?.scheme == "about" || to?.scheme == "blob" || to?.scheme == "data")
         decisionHandler(own || inner ? .allow : .cancel)

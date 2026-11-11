@@ -41,7 +41,7 @@ export function decodePng(buf) {
     at += 12 + length;
   }
   if (!width || !height || !idat.length) throw new Error("PNG without image data");
-  const raw = inflateSync(Buffer.concat(idat)), stride = width * channels;
+  const raw = inflateSync(Buffer.concat(idat), { maxOutputLength: 1 << 28 }), stride = width * channels;
   if (raw.length < (stride + 1) * height) throw new Error("PNG image data is cut short");
   const data = Buffer.alloc(stride * height);
   for (let y = 0; y < height; y++) {
@@ -163,7 +163,9 @@ export async function watch(argv = process.argv.slice(3)) {
   const cellEnv = /^(\d+)x(\d+)$/.exec(process.env.MATH_BOARD_CELL_PX ?? "");
   const cell = cellEnv ? { w: Number(cellEnv[1]), h: Number(cellEnv[2]) } : { w: 8, h: 17 };
   const link = new BoardLink({ dataDir: defaultDataDir(), context: {} });
-  const note = (text) => { if (!once) stdout.write(`\x1b[H\x1b[2J\x1b[2m${text}\x1b[0m\r\n`); };
+  // Text from the board (titles, error messages) is printed without control characters: it must not steer the terminal.
+  const plain = (text) => String(text).replace(/[\u0000-\u0009\u000b-\u000c\u000e-\u001f\u007f-\u009f]/g, "");
+  const note = (text) => { if (!once) stdout.write(`\x1b[H\x1b[2J\x1b[2m${plain(text)}\x1b[0m\r\n`); };
 
   let pixels = null, drawing = false, again = false, shown = "";
   async function frame() {
@@ -173,7 +175,7 @@ export async function watch(argv = process.argv.slice(3)) {
       : fitPicture({ cols: stdout.columns ?? 100, rows: stdout.rows ?? 30, cell, region, pixels });
     const { png } = await link.request("/api/snapshot", { region, width });
     const chapter = board.camera?.chapter && (board.chapters ?? []).find((c) => c.id === board.camera.chapter);
-    const status = [board.title, overview ? "whole lesson" : chapter?.title, board.lastStep ? `step ${board.lastStep}` : "", `revision ${revision}`].filter(Boolean).join(" · ");
+    const status = [board.title, overview ? "whole lesson" : chapter?.title, board.lastStep ? `step ${board.lastStep}` : "", `revision ${revision}`].filter(Boolean).map((part) => plain(part).replace(/[\r\n]/g, " ")).join(" · ");
     return { sixel: toSixel(decodePng(Buffer.from(png, "base64"))), status };
   }
   async function draw() {

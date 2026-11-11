@@ -71,7 +71,7 @@ function fakeChromium({ sandbox = true, page = () => fakePage(), launchDelay = 0
 test("Chromium launches with its sandbox; without one it falls back and says so", async () => {
   const sandboxed = fakeChromium();
   assert.equal((await launchChromium(sandboxed)).sandboxNote, null);
-  assert.deepEqual(sandboxed.launches, [{ headless: true, chromiumSandbox: true }]);
+  assert.deepEqual(sandboxed.launches, [{ headless: true, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false, chromiumSandbox: true }]); // the board stops the browser itself on a signal
 
   const noSandbox = fakeChromium({ sandbox: false });
   const { sandboxNote } = await launchChromium(noSandbox);

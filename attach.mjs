@@ -91,7 +91,7 @@ export class BoardLink {
   }
 
   async connect(host) {
-    for (let tries = 0; tries < 4; tries++) {
+    for (let tries = 0, waits = 0; tries < 4; tries++) {
       const s = new BoardServer({ dataDir: this.dataDir, title: this.title, exclusive: true });
       const owner = await s.liveOwner();
       if (!owner && !host) return this;
@@ -102,7 +102,12 @@ export class BoardLink {
       } catch (err) {
         if (!err?.hosted) throw err;
         const { token } = readSession(this.dataDir);
-        if (!token) continue; // the host is between taking the lock and writing its session
+        if (!token) {
+          // The host is between taking the lock and writing its session: give it a moment.
+          if (waits++ < 60) tries--;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          continue;
+        }
         this.remote = { port: err.hosted.port, pid: err.hosted.pid, token };
         return this;
       }

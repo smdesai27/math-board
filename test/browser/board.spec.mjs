@@ -404,6 +404,38 @@ test("a stopped board server is reported after a sustained outage; the tab recon
   await expect(page.locator("#board-title")).toHaveText("And after");
 });
 
+test("after a lost connection the page sends its token only to the board, not to another program on the port", async ({ page }) => {
+  await page.clock.install();
+  await ready(page);
+  const http = server.server, port = server.port;
+  await new Promise((resolve) => { http.close(resolve); http.closeAllConnections(); });
+  await expect(page.locator("#conn")).toHaveText("Connection lost · reconnecting…");
+  // Another program takes the port and answers everything, ping included, as well as it can.
+  const { createServer } = await import("node:http");
+  const seen = [];
+  const impostor = createServer((req, res) => {
+    seen.push(`${req.url} ${req.headers.authorization ?? ""}`);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, name: "math-board", proof: "0".repeat(64) }));
+  });
+  await new Promise((resolve) => impostor.listen(port, "127.0.0.1", resolve));
+  try {
+    for (let i = 0; i < 6; i++) {
+      await page.clock.fastForward(5000);
+      await page.waitForTimeout(100);
+    }
+    await expect.poll(() => seen.filter((line) => line.startsWith("/api/ping?n=")).length).toBeGreaterThan(1);
+    expect(seen.filter((line) => line.includes(server.token))).toEqual([]);
+    await expect(page.locator("#conn")).toHaveText("Board server stopped");
+  } finally {
+    await new Promise((resolve) => { impostor.close(resolve); impostor.closeAllConnections(); });
+  }
+  // The board comes back: the page recognises it and reconnects.
+  await new Promise((resolve) => http.listen(port, "127.0.0.1", resolve));
+  await page.clock.fastForward(6000);
+  await expect(page.locator("#conn")).toHaveText(`Connected · revision ${server.revision}`);
+});
+
 /** Serve the page a board whose equations are `equations()` (the real server's revision and the rest of its state). */
 async function craftEquations(page, equations) {
   await page.route("**/api/state", async (route) => {

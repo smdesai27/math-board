@@ -281,7 +281,9 @@ const NUMBER = (v) => (typeof v === "number" && Number.isFinite(v) ? clamp(v, -1
 const COLOR = (v) => (typeof v === "string" && v.length <= 32 && !/[;{}<>]|url\s*\(/i.test(v) ? v : undefined);
 const DASH = (v) => (typeof v === "string" && /^[\d.\s,]{1,40}$/.test(v) ? v.trim() : undefined);
 const LABEL = (v, n = 80) => (typeof v === "string" ? v.slice(0, n) : undefined);
-const VALID_ID = (v) => typeof v === "string" && v.length > 0 && v.length <= MAX_ID_LENGTH;
+/** Control characters (C0, DEL, C1): never in an id or a title, which reach the clipboard and a terminal's status line. */
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+const VALID_ID = (v) => typeof v === "string" && v.length > 0 && v.length <= MAX_ID_LENGTH && !CONTROL.test(v);
 
 /** Small edit distance, for "did you mean" hints on unknown fields. */
 function closeTo(a, b) {
@@ -387,7 +389,7 @@ export function sanitizeChapter(raw, { strict = false, where = "chapter" } = {})
   const r = reader(raw, where, strict);
   const out = {
     id: r.id("id") ?? randomUUID(),
-    title: r.str("title", 120) ?? "",
+    title: (r.str("title", 120) ?? "").replace(new RegExp(CONTROL, "g"), " "),
     x: r.num("x", 0),
     y: r.num("y", 0),
     w: clamp(r.num("w", 0) || CHAPTER.w, 200, 20000),
@@ -678,7 +680,12 @@ function sanitizeTable(raw, r, where, strict) {
 /** A code listing: plain text in a monospace font, with line numbers and highlighted lines. Nothing is run. */
 function sanitizeCode(raw, r, where, strict) {
   if (typeof raw.source !== "string" || !raw.source.trim()) fail(`${where}: code needs source (the listing as text)`);
-  const source = raw.source.replace(/\r\n?/g, "\n").replace(/\t/g, "  ").replace(/\n+$/, "");
+  // The size check comes first: nothing below runs over a source of unbounded length.
+  if (raw.source.length > MAX_CODE_CHARS * 2) fail(`${where}: code takes at most ${MAX_CODE_LINES} lines and ${MAX_CODE_CHARS} characters (it has ${raw.source.length} characters): show the part you are teaching`);
+  let source = raw.source.replace(/\r\n?/g, "\n").replace(/\t/g, "  ");
+  let end = source.length;
+  while (end > 0 && source[end - 1] === "\n") end--;
+  source = source.slice(0, end);
   const lines = source.split("\n");
   if (source.length > MAX_CODE_CHARS || lines.length > MAX_CODE_LINES) fail(`${where}: code takes at most ${MAX_CODE_LINES} lines and ${MAX_CODE_CHARS} characters (it has ${lines.length} lines, ${source.length} characters): show the part you are teaching`);
   const out = { source };
@@ -1069,7 +1076,7 @@ export function applyUpdateReport(state, update, { strict = true, html = false, 
   const warnings = [];
   if (update.title !== undefined) {
     if (typeof update.title !== "string" || update.title.length > 200) fail("title must be a string of at most 200 characters");
-    next.title = update.title;
+    next.title = update.title.replace(new RegExp(CONTROL, "g"), " ");
   }
 
   const clear = update.clear;
@@ -1144,6 +1151,7 @@ export function applyUpdateReport(state, update, { strict = true, html = false, 
       if (kind !== "shape" || raw.type !== "arrow") fail(`${where}: from and to are for arrows`);
       if (relative || raw.points !== undefined) fail(`${where}: an arrow takes points, or from and to, not both`);
       if (from === undefined || to === undefined) fail(`${where}: an arrow between items needs both from and to`);
+      if (from === to) fail(`${where}: from and to are the same item (${show(from)}); an arrow joins two items`);
       const a = boxOf(from, where, "from"), b = boxOf(to, where, "to");
       const chapter = rest.chapter ?? a.chapter, o = originOf(chapter), pad = Math.min(gap ?? 8, 200);
       const centre = (box) => ({ x: box.x + box.w / 2, y: box.y + box.h / 2 });
@@ -1554,13 +1562,25 @@ export function readSession(dataDir) {
   }
 }
 
-/** The lock's owner if it is a board server that answers on its port right now, else null. */
+/**
+ * The key a board proves itself with on /api/ping: derived from its token, written in its lock
+ * (0600), and so known only to this user's sessions, the page and the Mac app. Whoever merely
+ * listens on the board's port cannot answer a ping's question, and so is never sent the token.
+ */
+export const pingKey = (token) => createHmac("sha256", token).update("math-board ping").digest("hex");
+export const pingProof = (key, nonce) => createHmac("sha256", key).update(nonce).digest("hex");
+const NONCE_RE = /^[A-Za-z0-9_-]{16,128}$/;
+
+/** The lock's owner if it is the board server that wrote the lock and answers on its port right now, else null. */
 async function answering(lock) {
-  if (!lock || !Number.isInteger(lock.port)) return null;
+  if (!lock || !Number.isInteger(lock.port) || typeof lock.key !== "string") return null;
   try {
-    const res = await fetch(`http://127.0.0.1:${lock.port}/api/ping`, { signal: AbortSignal.timeout(1500) });
+    const nonce = randomBytes(24).toString("hex");
+    const res = await fetch(`http://127.0.0.1:${lock.port}/api/ping?n=${nonce}`, { signal: AbortSignal.timeout(1500) });
     const body = await res.json();
-    return body?.instance === lock.instance ? lock : null;
+    const want = Buffer.from(pingProof(lock.key, nonce));
+    const got = Buffer.from(String(body?.proof ?? ""));
+    return got.length === want.length && timingSafeEqual(got, want) ? lock : null;
   } catch {
     return null;
   }
@@ -1667,9 +1687,11 @@ export class BoardServer {
       if (typeof a.path !== "string" || !a.path || a.path.length > 1024) fail(`${where}: path must be the path of an image file`);
       const asked = a.path.startsWith("~/") ? path.join(homedir(), a.path.slice(2)) : a.path;
       if (!path.isAbsolute(asked)) fail(`${where}: path must be absolute (or start with ~/), got ${show(a.path)}`);
+      const within = (file) => allowed.some((root) => file === root || file.startsWith(root + path.sep));
       const real = await realpath(asked).catch(() => null);
-      if (!real) fail(`${where}: no file at ${a.path}`);
-      if (!allowed.some((root) => real === root || real.startsWith(root + path.sep)))
+      // Whether a file exists is only said for paths inside the allowed folders.
+      if (!real && (within(path.resolve(asked)) || imageDirs().some((root) => path.resolve(asked).startsWith(path.resolve(root) + path.sep)))) fail(`${where}: no file at ${a.path}`);
+      if (!real || !within(real))
         fail(`${where}: ${a.path} is outside the folders this board may show images from (${imageDirs().join(", ") || "none"}). The learner can allow more with MATH_BOARD_IMAGE_DIRS.`);
       const info = await stat(real);
       if (!info.isFile() || info.size > MAX_IMAGE_BYTES) fail(`${where}: ${a.path} must be a file of at most ${MAX_IMAGE_BYTES / 1024 / 1024} MiB`);
@@ -1712,7 +1734,7 @@ export class BoardServer {
     const int = (v) => (Number.isInteger(v) && v >= 0 && v <= 1e6 ? v : 0);
     const sliders = {};
     for (const [id, text] of Object.entries(raw.sliders && typeof raw.sliders === "object" ? raw.sliders : {}).slice(0, 20))
-      if (items.get(id)?.type === "plot" && typeof text === "string" && text.length <= 200 && /^[\p{L}\p{N}_ =.,+\u2212-]*$/u.test(text)) sliders[id] = text;
+      if (items.get(id)?.type === "plot" && typeof text === "string" && text.length <= 200 && /^[A-Za-z][A-Za-z0-9_]{0,15} = [\d.\u2212]{1,24}(, [A-Za-z][A-Za-z0-9_]{0,15} = [\d.\u2212]{1,24})*$/u.test(text)) sliders[id] = text;
     this.learner = {
       at: Date.now(),
       step: int(raw.step),
@@ -1794,7 +1816,7 @@ export class BoardServer {
   }
 
   async save(name = "default") {
-    if (!SAVE_NAME_RE.test(name)) fail(`invalid save name: ${JSON.stringify(name)} (letters, digits, . _ -; at most 64; not starting with a dot)`);
+    if (!SAVE_NAME_RE.test(name)) fail(`invalid save name: ${show(name)} (letters, digits, . _ -; at most 64; not starting with a dot)`);
     const payload = this.payload(name);
     const job = this.saveQueue.then(async () => {
       const dir = await this.savesDir();
@@ -1868,7 +1890,7 @@ export class BoardServer {
    * { revision, dropped, skipped }: skipped describes what the save had that could not be used.
    */
   async load(name = "default", baseRevision = this.revision) {
-    if (!SAVE_NAME_RE.test(name)) fail(`invalid save name: ${JSON.stringify(name)}`);
+    if (!SAVE_NAME_RE.test(name)) fail(`invalid save name: ${show(name)}`);
     let payload;
     try {
       payload = await this.readBoardFile(path.join(this.dataDir, "saves", `${name}.json`));
@@ -2014,7 +2036,7 @@ export class BoardServer {
 
   writeLock(flag = "w") {
     try {
-      writeFileSync(this.lockFile, JSON.stringify({ pid: process.pid, port: this.port, started: this.startedAt, instance: this.instance }), { mode: 0o600, flag });
+      writeFileSync(this.lockFile, JSON.stringify({ pid: process.pid, port: this.port, started: this.startedAt, instance: this.instance, key: pingKey(this.token) }), { mode: 0o600, flag });
       return true;
     } catch (err) {
       // An unwritable data folder shows up as a failed autosave.
@@ -2039,15 +2061,31 @@ export class BoardServer {
    * Returns the live owner when there is one (this server must not run), else null.
    */
   async claimLock() {
+    const text = () => {
+      try {
+        return readFileSync(this.lockFile, "utf8");
+      } catch {
+        return null;
+      }
+    };
     for (let tries = 0; tries < 3; tries++) {
-      if (this.writeLock("wx")) return null;
+      if (this.writeLock("wx")) {
+        // Another session that judged the old lock dead a moment ago may have replaced this one:
+        // look once more, and yield to it if so.
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        const now = text();
+        if (now !== null && now.includes(this.instance)) return null;
+        continue;
+      }
+      const seen = text();
       const owner = await this.liveOwner();
       if (owner) return owner;
+      // Remove only the lock just judged dead, not one a faster session put in its place.
       try {
-        unlinkSync(this.lockFile);
+        if (seen !== null && text() === seen) unlinkSync(this.lockFile);
       } catch {}
     }
-    return null;
+    return this.liveOwner();
   }
 
   writeSession() {
@@ -2105,6 +2143,7 @@ export class BoardServer {
     // A second board on a folder whose first one still runs here keeps to itself: its own token and port.
     const second = Boolean(previous) && !reuse;
     const kept = second ? { token: null, port: null } : readSession(this.dataDir);
+    const fresh = this.token;
     if (reuse) this.token = previous.token;
     else if (kept.token) this.token = kept.token;
     const asked = Number(process.env.MATH_BOARD_PORT);
@@ -2112,7 +2151,10 @@ export class BoardServer {
     try {
       await bind(port);
     } catch (err) {
-      if (!port || err?.code !== "EADDRINUSE") throw err;
+      if (!port || !["EADDRINUSE", "EACCES", "EADDRNOTAVAIL"].includes(err?.code)) throw err;
+      // Something else has the board's port, and open tabs may be telling it the old token:
+      // this board gets a new one along with its new port.
+      this.token = fresh;
       await bind(0);
     }
     const addr = server.address();
@@ -2275,7 +2317,11 @@ export class BoardServer {
         }
       }
       // Who answers here: lets a session that found this board's lock tell it from a stale one.
-      if (req.method === "GET" && pathname === "/api/ping") return this.json(res, 200, { ok: true, name: "math-board", instance: this.instance });
+      // The proof answers the caller's random question with the key in this board's lock (see pingKey).
+      if (req.method === "GET" && pathname === "/api/ping") {
+        const nonce = new URL(req.url, "http://127.0.0.1").searchParams.get("n");
+        return this.json(res, 200, { ok: true, name: "math-board", ...(NONCE_RE.test(nonce ?? "") && { proof: pingProof(pingKey(this.token), nonce) }) });
+      }
       // Static app routes (page load carries no auth yet; the app reads the token from the URL
       // fragment and sends it on every API call).
       if (req.method === "GET" && !pathname.startsWith("/api/")) {

@@ -30,11 +30,33 @@ function status(text, note = false, force = false) {
   bar.classList.toggle("note", note);
   if (note) noteTimer = setTimeout(() => { noteShowing = false; bar.classList.remove("note"); $("conn").textContent = routineStatus; }, 6000);
 }
+/**
+ * Is the board still what answers on this address? After a lost connection another program may
+ * have taken the port, so before the token is sent again the page asks a question only the board
+ * can answer (see pingKey in server.mjs): HMAC(HMAC(token, "math-board ping"), nonce).
+ */
+let hostInDoubt = false;
+async function hostAnswers() {
+  try {
+    const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const text = new TextEncoder();
+    const hmac = async (key, message) => hex(await crypto.subtle.sign("HMAC", await crypto.subtle.importKey("raw", text.encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]), text.encode(message)));
+    const nonce = hex(crypto.getRandomValues(new Uint8Array(24)));
+    const answer = await (await fetch(`/api/ping?n=${nonce}`)).json();
+    if (answer?.proof !== (await hmac(await hmac(sessionToken, "math-board ping"), nonce))) return false;
+    hostInDoubt = false;
+    return true;
+  } catch {
+    return false;
+  }
+}
 async function request(path, body) {
   let response;
+  if (hostInDoubt && !(await hostAnswers())) throw new Error("Cannot reach the board server");
   try {
     response = await fetch(path, { headers: { Authorization: `Bearer ${sessionToken}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, method: body === undefined ? "GET" : "POST", body: body === undefined ? undefined : JSON.stringify(body) });
   } catch {
+    hostInDoubt = true;
     throw new Error("Cannot reach the board server");
   }
   return { ...(await response.json().catch(() => ({ ok: false, error: `HTTP ${response.status}` }))), status: response.status };
@@ -1068,6 +1090,8 @@ function Table({ item }) {
   // One size for the whole table: the asked one, or smaller so the longest cell fits its column.
   const longest = Math.max(1, ...all.flat().map((c) => (isMathCell(c) ? c.length * 0.55 : c.length)));
   const size = Math.max(7, Math.min(item.size || 20, rh * 0.56, (cw - 14) / (longest * 0.5)));
+  const fit = Math.max(2, Math.floor((cw - 14) / (size * 0.5)));
+  const cut = (cell) => (cell.length > fit ? `${cell.slice(0, fit - 1)}…` : cell);
   const align = item.align || "center";
   const tx = (c) => x + c * cw + (align === "left" ? 10 : align === "right" ? cw - 10 : cw / 2);
   const anchor = align === "left" ? "start" : align === "right" ? "end" : "middle";
@@ -1082,7 +1106,7 @@ function Table({ item }) {
       ? <foreignObject key={`${i}-${c}`} x={x + c * cw} y={y + i * rh} width={cw} height={rh} style={{ pointerEvents: "none" }}>
           <div xmlns="http://www.w3.org/1999/xhtml" className="table-math" style={{ fontSize: `${size}px`, justifyContent: align === "left" ? "flex-start" : align === "right" ? "flex-end" : "center" }}><CellMath latex={cell.slice(1, -1)} /></div>
         </foreignObject>
-      : <text key={`${i}-${c}`} x={tx(c)} y={y + i * rh + rh / 2} fill={i < head ? "#f2c14e" : "#e8e3d9"} fontSize={size} textAnchor={anchor} dominantBaseline="central" style={{ fontFamily: FONTS.serif, fontStyle: i < head ? "italic" : undefined }}>{cell}</text>))}
+      : <text key={`${i}-${c}`} x={tx(c)} y={y + i * rh + rh / 2} fill={i < head ? "#f2c14e" : "#e8e3d9"} fontSize={size} textAnchor={anchor} dominantBaseline="central" style={{ fontFamily: FONTS.serif, fontStyle: i < head ? "italic" : undefined }}>{cut(cell)}</text>))}
   </g>;
 }
 function Code({ item }) {
@@ -1124,7 +1148,8 @@ function Chart({ item }) {
   const padL = 48, padR = 12, padT = (item.title ? 34 : 14) + (item.yLabel ? 22 : 0), padB = 30 + (item.xLabel ? 22 : 0);
   const iw = W - padL - padR, ih = H - padT - padB, left = x + padL, top = y + padT, bottom = top + ih;
   const lo = Math.min(0, ...bars.map((b) => b.value)), hi = Math.max(0, ...bars.map((b) => b.value));
-  let [y0, y1] = item.yRange || [lo, hi + (hi - lo || 1) * 0.1];
+  // Head room above the tallest bar, and foot room under a negative one, for the value labels.
+  let [y0, y1] = item.yRange || [lo < 0 ? lo - (hi - lo) * 0.14 : lo, hi + (hi - lo || 1) * 0.1];
   if (!(y1 > y0)) y1 = y0 + 1;
   const sy = (v) => bottom - ((Math.max(y0, Math.min(y1, v)) - y0) / (y1 - y0)) * ih;
   const step = niceStep(y1 - y0, Math.max(3, Math.round(ih / 55))), yticks = tickValues(y0, y1, step);
@@ -1718,7 +1743,8 @@ function connect() {
   live?.close();
   live = new LiveEvents({
     open: () => new EventSource(`/api/events?token=${encodeURIComponent(sessionToken)}`),
-    onState: onConnection,
+    onState: (state) => { if (state !== "connected") hostInDoubt = true; onConnection(state); },
+    check: hostAnswers,
     quietAfter: 70000, // the server pings every 25 s
     // The first event after an outage may come from a restarted server: show its board as it is.
     onEvent: (d, { resync }) => {

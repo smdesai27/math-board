@@ -41,6 +41,11 @@ test("code: a bounded listing with highlighted lines; tabs become spaces and not
   bad({ type: "code", source: "  " }, /code needs source/);
   bad({ type: "code", source: "a\nb", highlight: [3] }, /highlight must be a list of line numbers from 1 to 2/);
   bad({ type: "code", source: Array.from({ length: 81 }, () => "x").join("\n") }, /at most 80 lines and 6000 characters \(it has 81 lines/);
+  // A huge source is refused by its length, before anything scans it (this was quadratic once).
+  const started = Date.now();
+  bad({ type: "code", source: "\n".repeat(400000) + "x" }, /at most 80 lines and 6000 characters \(it has 400001 characters\)/);
+  assert.equal(strict({ type: "code", source: "x" + "\n".repeat(5000) }).source, "x");
+  assert.ok(Date.now() - started < 1000);
 });
 
 test("chart: bars or histogram values, each with its own fields", () => {
@@ -137,6 +142,8 @@ test("an image artifact is copied into the data folder from an allowed folder on
   await assert.rejects(add({ type: "image", path: path.join(learn, "link.png") }), /is outside the folders/, "a link out of the folder is followed before the check");
   await assert.rejects(add({ type: "image", path: path.join(learn, "notes.png") }), /is not a PNG, JPEG, GIF or WebP image/);
   await assert.rejects(add({ type: "image", path: path.join(learn, "missing.png") }), /no file at/);
+  // Outside the allowed folders the answer is the same whether or not the file exists.
+  await assert.rejects(add({ type: "image", path: path.join(outside, "missing.png") }), /is outside the folders/);
   await assert.rejects(add({ type: "image", path: "fig.png" }), /path must be absolute/);
   await assert.rejects(add({ type: "image", path: path.join(learn, "notes.png"), file: item.file }), /give path only/);
   await assert.rejects(add({ type: "image" }), /image needs path/);

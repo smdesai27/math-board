@@ -15,6 +15,7 @@
 - `pi-math-board serve` hosts the board with no agent attached.
 - New board (the page's ⋯ menu, or `/board new`): saves the lesson under its title and today's date, then starts an empty board. The teaching text tells the tutor that the learner decides when a new board starts.
 - `/board status` says when another session hosts the board; `/board stop` then leaves it running.
+- A board proves itself before anything is sent to it: joining sessions, the page after a lost connection and the Mac app ask `/api/ping` a random question that only the board can answer (a key derived from the token, kept in `board.lock`). If another program holds the board's saved port, the board starts on a new port with a new token.
 
 **Viewers**
 
@@ -48,6 +49,11 @@
 - Moving or restyling a plot keeps the slider values the learner set; only a change to its sliders resets them.
 - The hover reference is not recomputed on every frame of a pan or zoom; it comes back when the view rests.
 - The browser tests run in WebKit as well as Chromium.
+- Ids and titles are stored without control characters.
+- Ctrl-C stops the board cleanly once the headless browser has started (it used to exit with 130 and leave `board.lock`).
+- The MCP server ends the session on a request line beyond the SDK's 10 MiB buffer instead of staying alive without answering.
+- A saved port that can't be bound (in use, or privileged) no longer stops the board from starting.
+- A bar chart leaves room under negative bars for their value labels; a table cell too long for its column is cut with an ellipsis; an arrow from an item to itself is refused.
 
 **Tools**
 

@@ -265,6 +265,14 @@ test("strict input: unknown fields, wrong types and bad ids are rejected with th
   assert.equal(applyUpdate(b, { scene: { mode: "append", shapes: [{ type: "rect", x: "5", y: 0, w: 1, h: 1, extra: 1 }] } }, { strict: false }).scene.shapes[0].x, 0);
 });
 
+test("ids and titles carry no control characters (they reach the clipboard and a terminal status line)", () => {
+  assert.throws(() => applyUpdate(emptyBoard(), { equations: [{ op: "add", id: "a\nb", latex: "x" }] }, { strict: true }), /id/);
+  assert.throws(() => applyUpdate(emptyBoard(), { equations: [{ op: "add", id: "a\u001b]52;c;x", latex: "x" }] }, { strict: true }), /id/);
+  const board = applyUpdate(emptyBoard(), { title: "Lesson\u001b]0;x\u0007", chapters: [{ op: "add", id: "c1", title: "One\u009b2J" }] }, { strict: true });
+  assert.equal(board.title, "Lesson ]0;x ");
+  assert.equal(board.chapters[0].title, "One 2J");
+});
+
 test("ids are unique across shapes, artifacts and equations", () => {
   const b = applyUpdate(emptyBoard(), { equations: [{ op: "add", id: "eq1", latex: "x" }] });
   assert.throws(() => applyUpdate(b, { scene: { mode: "append", shapes: [{ type: "rect", id: "eq1", x: 0, y: 0, w: 1, h: 1 }] } }), /duplicate id "eq1": used by a shape and an equation/);

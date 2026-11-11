@@ -163,7 +163,14 @@ function shutdown(reason) {
 }
 
 process.on("unhandledRejection", (err) => console.error("math-board MCP: unhandled rejection:", err));
-const connection = serveStdio(createMcpServer, { onerror: (err) => console.error(`math-board MCP: ${err?.message ?? err}`) });
+const connection = serveStdio(createMcpServer, {
+  onerror: (err) => {
+    console.error(`math-board MCP: ${err?.message ?? err}`);
+    // A request line beyond the SDK's read buffer stops it reading for good: end the session
+    // (the client sees the exit) rather than stay alive and deaf.
+    if (/ReadBuffer exceeded/.test(String(err?.message))) shutdown("request too large").finally?.(() => {});
+  },
+});
 // The client closing our stdin ends the session (the MCP stdio binding): stop the board too.
 process.stdin.once("end", () => shutdown("stdin closed"));
 process.stdin.once("close", () => shutdown("stdin closed"));

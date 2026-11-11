@@ -9,7 +9,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { BoardLink, adoptMcpFolder } from "../attach.mjs";
-import { BoardServer, readSession } from "../server.mjs";
+import http from "node:http";
+import { BoardServer, pingKey, pingProof, readSession } from "../server.mjs";
 
 const temps = [];
 test.after(async () => {
@@ -120,9 +121,44 @@ test("tool calls over HTTP need the token, name a real tool, and may be larger t
   t.after(() => bare.stop());
   const r = await fetch(`http://127.0.0.1:${bare.port}/api/tool`, { method: "POST", headers: { authorization: `Bearer ${bare.token}`, "content-type": "application/json" }, body: "{\"name\":\"board_read\"}" });
   assert.equal(r.status, 400);
-  // ping names the instance without the token; status needs it.
-  assert.equal((await (await fetch(`http://127.0.0.1:${a.port}/api/ping`)).json()).instance, a.local.instance);
+  // ping says only that a board is here, and answers a question with the key in its lock; status needs the token.
+  assert.deepEqual(await (await fetch(`http://127.0.0.1:${a.port}/api/ping`)).json(), { ok: true, name: "math-board" });
+  const nonce = "n".repeat(32);
+  const lock = JSON.parse(await readFile(path.join(dir, "board.lock"), "utf8"));
+  assert.equal(lock.key, pingKey(a.local.token));
+  assert.equal((await (await fetch(`http://127.0.0.1:${a.port}/api/ping?n=${nonce}`)).json()).proof, pingProof(lock.key, nonce));
+  assert.equal((await (await fetch(`http://127.0.0.1:${a.port}/api/ping?n=short`)).json()).proof, undefined);
   assert.equal((await fetch(`http://127.0.0.1:${a.port}/api/status`)).status, 401);
+});
+
+test("a program that merely listens on a dead host's port is not joined and is never sent the token", async (t) => {
+  const dir = await tempDir();
+  const a = session(dir);
+  await a.ensure();
+  const token = a.local.token, port = a.port;
+  const lock = await readFile(path.join(dir, "board.lock"), "utf8");
+  await a.stop();
+  // The host died without removing its lock, its pid still counts as alive, and
+  // an impostor took the port. It knows everything a ping ever said, but not the lock's key.
+  const seen = [];
+  const impostor = http.createServer((req, res) => {
+    seen.push(`${req.method} ${req.url} ${req.headers.authorization ?? ""}`);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, name: "math-board", instance: JSON.parse(lock).instance, proof: "0".repeat(64), content: [{ type: "text", text: "not the board" }] }));
+  });
+  await new Promise((resolve) => impostor.listen(port, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => impostor.close(resolve)));
+  await writeFile(path.join(dir, "board.lock"), JSON.stringify({ ...JSON.parse(lock), pid: process.ppid })); // another live process
+  const b = session(dir);
+  t.after(() => b.stop());
+  assert.equal(await b.find(), false, "nothing to join");
+  await b.ensure();
+  assert.equal(b.hosting, true);
+  assert.notEqual(b.port, port);
+  assert.notEqual(b.local.token, token, "the old port is someone else's now, so the old token is retired");
+  assert.equal(readSession(dir).token, b.local.token);
+  assert.ok(seen.length > 0 && seen.every((line) => !line.includes(token) && !line.includes(b.local.token)), "the impostor saw pings only");
+  assert.doesNotMatch(text(await b.call("board_read", {})), /not the board/);
 });
 
 test("the old mcp/ folder's saves and autosave are brought along once, never over existing files", async () => {
