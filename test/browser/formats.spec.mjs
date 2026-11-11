@@ -13,8 +13,8 @@ test.afterEach(async () => {
   await server.stop();
   await rm(dataDir, { recursive: true, force: true });
 });
-// A 2x1 red PNG.
-const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAD0lEQVR4AWP8z8DwnwEIAAsEAgCQkjTnAAAAAElFTkSuQmCC", "base64");
+// A 2x1 red PNG (with correct checksums: WebKit on Linux refuses one without).
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8DwH4QBEfcD/ePF9e8AAAAASUVORK5CYII=", "base64");
 const FILE = `${"ab".repeat(32)}.png`;
 
 async function draw(page, artifacts) {

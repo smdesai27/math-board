@@ -133,7 +133,10 @@ test("the layout check reports a Mermaid diagram shrunk below reading size", asy
     { type: "mermaid", id: "roomy", x: 40, y: 300, width: 1120, height: 300, source },
   ] } });
   await settled(page);
-  const { issues } = await page.evaluate(() => window.__boardLint());
+  // The diagram's text is measured once its fonts are in: ask until the check has seen it.
+  const lint = () => page.evaluate(() => window.__boardLint());
+  await expect.poll(async () => (await lint()).issues.filter((i) => /^mermaid /.test(i)).length).toBe(1);
+  const { issues } = await lint();
   expect(issues.filter((i) => /^mermaid /.test(i))).toHaveLength(1);
   expect(issues.find((i) => /^mermaid /.test(i))).toMatch(/^mermaid tiny: text renders at about \d+ px .* it needs at least \d+x\d+/);
 });
