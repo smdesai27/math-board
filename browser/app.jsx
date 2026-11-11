@@ -204,7 +204,8 @@ function tween(ms, apply) {
 const GEOM = "polyline,line,path,rect,ellipse,circle,polygon";
 function defaultReveal(g) {
   if (g.dataset.reveal) return g.dataset.reveal;
-  if (g.dataset.kind === "artifact") return g.querySelector(":scope > .plot") ? "draw" : g.querySelector(".html-slot") ? "fade" : "wipe";
+  // Math in a table's cells is HTML inside the SVG, which a clip-path sweep does not cut cleanly everywhere.
+  if (g.dataset.kind === "artifact") return g.querySelector(":scope > .plot") ? "draw" : g.querySelector(".html-slot,.table-math") ? "fade" : "wipe";
   if (g.dataset.kind === "mark") return g.querySelector("[stroke-dasharray]") ? "wipe" : "draw";
   return "write";
 }
@@ -835,6 +836,9 @@ function Plot({ item }) {
       points: (item.points || []).map((p) => ({ ...p, xAt: k(p.x), yAt: k(p.y) })),
       vlines: (item.vlines || []).map((v) => ({ ...v, at: k(v.x) })),
       hlines: (item.hlines || []).map((h) => ({ ...h, at: k(h.y) })),
+      // Arrows and segments in the plot's own coordinates: each end is [x, y], numbers or slider expressions.
+      vectors: (item.vectors || []).map((v) => ({ ...v, ends: [k(v.from[0]), k(v.from[1]), k(v.to[0]), k(v.to[1])] })),
+      segments: (item.segments || []).map((v) => ({ ...v, ends: [k(v.from[0]), k(v.from[1]), k(v.to[0]), k(v.to[1])] })),
     };
   }, [item, params]);
   const W = item.width, H = item.height;
@@ -855,6 +859,7 @@ function Plot({ item }) {
       for (const f of compiled.parametric) for (let i = 0; i <= 200; i++) { s.t = f.t[0] + ((f.t[1] - f.t[0]) * i) / 200; add(f.fy(s)); }
       for (const p of compiled.points) add(p.yAt(s));
       for (const h of compiled.hlines) add(h.at(s));
+      for (const v of [...compiled.vectors, ...compiled.segments]) { add(v.ends[1](s)); add(v.ends[3](s)); }
     }
     ys.sort((a, b) => a - b);
     const lo = ys.length ? ys[Math.floor(ys.length * 0.02)] : -1, hi = ys.length ? ys[Math.ceil(ys.length * 0.98) - 1] : 1;
@@ -919,6 +924,21 @@ function Plot({ item }) {
     onPointerDown: (e) => { if (e.button !== 0) return; e.currentTarget.setPointerCapture(e.pointerId); stop(pt.x, pt.y); dragTo(pt, e); },
     onPointerMove: (e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) dragTo(pt, e); },
   });
+  // A vector is a line with a head sized in screen units; a segment is the line alone.
+  const linework = (list, head, key) => list.map((v, i) => {
+    const [X1, Y1, X2, Y2] = v.ends.map(ev);
+    if (![X1, Y1, X2, Y2].every(Number.isFinite)) return null;
+    const ax = sx(X1), ay = sy(Y1), bx = sx(X2), by = sy(Y2), len = Math.hypot(bx - ax, by - ay);
+    const color = v.color || (head ? "#f2c14e" : "#e8e3d9"), w = v.width || (head ? 2.6 : 2);
+    const L = head ? Math.min(13, len * 0.45) : 0, ux = len ? (bx - ax) / len : 0, uy = len ? (by - ay) / len : 0;
+    const tx = bx - ux * L, ty = by - uy * L;
+    if (v.label) labels.push(<text key={`${key}l${i}`} x={(head ? bx : (ax + bx) / 2) + 8} y={(head ? by : (ay + by) / 2) - 8} fill={color} fontSize="16" {...HALO} style={{ ...font, fontStyle: "italic" }}>{v.label}</text>);
+    return <g key={`${key}${i}`} className={head ? "plot-vector" : "plot-segment"}>
+      <line x1={ax} y1={ay} x2={head ? tx + ux : bx} y2={head ? ty + uy : by} stroke={color} strokeWidth={w} strokeDasharray={v.dash} strokeLinecap="round" />
+      {head && len > 1 ? <polygon points={pts([[bx, by], [tx - uy * L * 0.42, ty + ux * L * 0.42], [tx + uy * L * 0.42, ty - ux * L * 0.42]])} fill={color} /> : null}
+    </g>;
+  });
+  const segments = linework(compiled.segments, false, "sg"), vectors = linework(compiled.vectors, true, "vc");
   const yLabelX = item.yLabel ? Math.min(Math.max(sx(axY), item.x + item.yLabel.length * 4.4 + 4), item.x + W - item.yLabel.length * 4.4 - 4) : 0;
   const rowsTop = item.y + H - params.length * SLIDER_ROW;
   return <g className="plot" ref={root} data-params={params.length ? params.map((p) => `${p.name} = ${fmtParam(p, values[p.name])}`).join(", ") : undefined}>
@@ -930,7 +950,7 @@ function Plot({ item }) {
     <g clipPath={`url(#${clipId})`}>
       {hlines.map((h, i) => <line key={`h${i}`} x1={left} y1={sy(h.v)} x2={right} y2={sy(h.v)} stroke={h.color || PLOT_INK.axis} strokeWidth={h.width || 1.5} strokeDasharray={h.dash || "6 5"} />)}
       {vlines.map((v, i) => <line key={`v${i}`} x1={sx(v.v)} y1={top} x2={sx(v.v)} y2={bottom} stroke={v.color || PLOT_INK.axis} strokeWidth={v.width || 1.5} strokeDasharray={v.dash || "6 5"} />)}
-      {curves}{paramCurves}
+      {curves}{paramCurves}{segments}{vectors}
     </g>
     {/* Labels go on top of the curves with a thin black halo, so a curve or a dashed marker
         crossing a tick label interrupts the line instead of striking through the text. */}
@@ -1029,6 +1049,104 @@ function decodeThen(url, live, set) {
   // A malformed SVG (e.g. invalid XML) fails to decode: surface it instead of drawing nothing.
   return img.decode().then(() => { if (live()) set(url); }, () => { throw new Error("invalid SVG: not well-formed XML (unclosed tag, stray & or <?)"); });
 }
+/* ---------- tables, code listings and charts: data the page draws itself ---------- */
+const isMathCell = (c) => c.length > 2 && c.startsWith("$") && c.endsWith("$");
+function CellMath({ latex }) {
+  const ref = React.useRef(null);
+  React.useLayoutEffect(() => {
+    if (!ref.current) return;
+    try { katex.render(latex, ref.current, { ...KATEX_OPTIONS, displayMode: false, macros: Object.create(null) }); } catch { ref.current.textContent = latex; }
+  }, [latex]);
+  return <span ref={ref} />;
+}
+function Table({ item }) {
+  const { x, y, width: W, height: H } = item;
+  const all = [...(item.header ? [item.header] : []), ...item.rows], cols = all[0].length, n = all.length;
+  const cw = W / cols, rh = H / n, head = item.header ? 1 : 0;
+  // One size for the whole table: the asked one, or smaller so the longest cell fits its column.
+  const longest = Math.max(1, ...all.flat().map((c) => (isMathCell(c) ? c.length * 0.55 : c.length)));
+  const size = Math.max(7, Math.min(item.size || 20, rh * 0.56, (cw - 14) / (longest * 0.5)));
+  const align = item.align || "center";
+  const tx = (c) => x + c * cw + (align === "left" ? 10 : align === "right" ? cw - 10 : cw / 2);
+  const anchor = align === "left" ? "start" : align === "right" ? "end" : "middle";
+  const rule = (k, strong) => <line key={`r${k}`} x1={x} y1={y + k * rh} x2={x + W} y2={y + k * rh} stroke={strong ? "#e8e3d9" : "#ffffff26"} strokeWidth={strong ? 1.6 : 1} />;
+  return <g className="table">
+    {(item.highlight || []).map((h, i) => <rect key={`h${i}`} className="table-highlight"
+      x={x + (h.col ?? 0) * cw} y={y + ((h.row ?? 0) + head) * rh} width={h.col === undefined ? W : cw} height={h.row === undefined ? item.rows.length * rh : rh}
+      fill={h.color || "#f2c14e"} fillOpacity="0.2" />)}
+    {Array.from({ length: n + 1 }, (_, k) => rule(k, k === 0 || k === n || (head && k === 1)))}
+    {Array.from({ length: cols - 1 }, (_, c) => <line key={`c${c}`} x1={x + (c + 1) * cw} y1={y} x2={x + (c + 1) * cw} y2={y + H} stroke="#ffffff1c" strokeWidth="1" />)}
+    {all.map((row, i) => row.map((cell, c) => isMathCell(cell)
+      ? <foreignObject key={`${i}-${c}`} x={x + c * cw} y={y + i * rh} width={cw} height={rh} style={{ pointerEvents: "none" }}>
+          <div xmlns="http://www.w3.org/1999/xhtml" className="table-math" style={{ fontSize: `${size}px`, justifyContent: align === "left" ? "flex-start" : align === "right" ? "flex-end" : "center" }}><CellMath latex={cell.slice(1, -1)} /></div>
+        </foreignObject>
+      : <text key={`${i}-${c}`} x={tx(c)} y={y + i * rh + rh / 2} fill={i < head ? "#f2c14e" : "#e8e3d9"} fontSize={size} textAnchor={anchor} dominantBaseline="central" style={{ fontFamily: FONTS.serif, fontStyle: i < head ? "italic" : undefined }}>{cell}</text>))}
+  </g>;
+}
+function Code({ item }) {
+  const { x, y, width: W, height: H } = item;
+  const lines = item.source.split("\n"), numbers = item.lineNumbers !== false;
+  const longest = Math.max(1, ...lines.map((l) => l.length)), padY = 12;
+  // The asked size, or smaller so the longest line and every line fit the box (a monospace glyph is 0.6 em wide).
+  const size = Math.max(6, Math.min(item.size || 17, (W - 24) / ((longest + (numbers ? 4 : 0)) * 0.602), (H - 2 * padY) / (lines.length * 1.36)));
+  const lh = Math.min(size * 1.45, (H - 2 * padY) / lines.length), gutter = numbers ? size * 0.602 * 4 : 0;
+  const mono = { fontFamily: FONTS.mono, whiteSpace: "pre" };
+  const marked = new Set(item.highlight || []);
+  return <g className="code">
+    <rect x={x} y={y} width={W} height={H} rx="10" fill="#ffffff0a" stroke="#ffffff1f" strokeWidth="1" />
+    {lines.map((_, i) => marked.has(i + 1) ? <g key={`m${i}`} className="code-highlight">
+      <rect x={x + 1} y={y + padY + i * lh} width={W - 2} height={lh} fill="#f2c14e" fillOpacity="0.16" />
+      <rect x={x + 1} y={y + padY + i * lh} width="3" height={lh} fill="#f2c14e" />
+    </g> : null)}
+    {item.language ? <text x={x + W - 10} y={y + 16} fill="#8a8578" fontSize="12" textAnchor="end" style={{ fontFamily: FONTS.sans }}>{item.language}</text> : null}
+    {lines.map((line, i) => <React.Fragment key={i}>
+      {numbers ? <text x={x + 12 + gutter - size * 1.1} y={y + padY + i * lh + lh / 2} fill={marked.has(i + 1) ? "#f2c14e" : "#6f6b61"} fontSize={size} textAnchor="end" dominantBaseline="central" style={mono}>{i + 1}</text> : null}
+      <text x={x + 12 + gutter} y={y + padY + i * lh + lh / 2} fill="#e8e3d9" fontSize={size} dominantBaseline="central" xmlSpace="preserve" style={mono}>{line}</text>
+    </React.Fragment>)}
+  </g>;
+}
+/** Bins for a histogram: `bins` equal-width bins over `range` (default: the data's own; Sturges' rule for the count). */
+function histogram(values, bins, range) {
+  let [a, b] = range || [Math.min(...values), Math.max(...values)];
+  if (!(b > a)) { a -= 0.5; b += 0.5; }
+  const k = bins || Math.max(2, Math.min(60, Math.ceil(Math.log2(values.length)) + 1));
+  const counts = Array(k).fill(0);
+  for (const v of values) if (v >= a && v <= b) counts[Math.min(k - 1, Math.floor(((v - a) / (b - a)) * k))]++;
+  return { a, b, bars: counts.map((value, i) => ({ value, lo: a + ((b - a) * i) / k, hi: a + ((b - a) * (i + 1)) / k })) };
+}
+function Chart({ item }) {
+  const { x, y, width: W, height: H } = item;
+  const hist = item.kind === "histogram" ? histogram(item.values, item.bins, item.range) : null;
+  const bars = hist ? hist.bars : item.bars;
+  const font = { fontFamily: FONTS.serif };
+  const padL = 48, padR = 12, padT = (item.title ? 34 : 14) + (item.yLabel ? 22 : 0), padB = 30 + (item.xLabel ? 22 : 0);
+  const iw = W - padL - padR, ih = H - padT - padB, left = x + padL, top = y + padT, bottom = top + ih;
+  const lo = Math.min(0, ...bars.map((b) => b.value)), hi = Math.max(0, ...bars.map((b) => b.value));
+  let [y0, y1] = item.yRange || [lo, hi + (hi - lo || 1) * 0.1];
+  if (!(y1 > y0)) y1 = y0 + 1;
+  const sy = (v) => bottom - ((Math.max(y0, Math.min(y1, v)) - y0) / (y1 - y0)) * ih;
+  const step = niceStep(y1 - y0, Math.max(3, Math.round(ih / 55))), yticks = tickValues(y0, y1, step);
+  const bw = iw / bars.length, gap = hist ? 0.5 : bw * 0.18, base = sy(0);
+  const labelSize = Math.max(9, Math.min(15, (bw - 4) / (Math.max(1, ...bars.map((b) => (b.label || "").length)) * 0.5)));
+  const fit = Math.max(1, Math.floor((bw - 2) / (labelSize * 0.5)));
+  const xs = hist ? niceStep(hist.b - hist.a, Math.max(3, Math.round(iw / 80))) : 0;
+  return <g className="chart">
+    {item.title ? <text x={x + W / 2} y={y + 22} fill="#e8e3d9" fontSize="20" textAnchor="middle" style={font}>{item.title}</text> : null}
+    <g stroke={PLOT_INK.grid} strokeWidth="1">{yticks.map((v) => <line key={`g${v}`} x1={left} y1={sy(v)} x2={left + iw} y2={sy(v)} />)}</g>
+    {bars.map((b, i) => <rect key={`b${i}`} className="chart-bar" x={left + i * bw + gap} y={Math.min(sy(b.value), base)} width={Math.max(1, bw - 2 * gap)} height={Math.max(0.5, Math.abs(sy(b.value) - base))}
+      fill={b.color || item.color || PLOT_COLORS[0]} fillOpacity="0.82" stroke="#000" strokeWidth={hist ? 1 : 0} />)}
+    <g stroke={PLOT_INK.axis} strokeWidth="1.6"><line x1={left} y1={base} x2={left + iw} y2={base} /><line x1={left} y1={top} x2={left} y2={bottom} /></g>
+    <g fill={PLOT_INK.tick} fontSize="14" {...HALO} style={font}>
+      {yticks.map((v) => <text key={`t${v}`} x={left - 7} y={sy(v) + 5} textAnchor="end">{fmtTick(v, step)}</text>)}
+      {hist ? tickValues(hist.a, hist.b, xs).map((v) => <text key={`x${v}`} x={left + ((v - hist.a) / (hist.b - hist.a)) * iw} y={bottom + 19} textAnchor="middle">{fmtTick(v, xs)}</text>)
+        : bars.map((b, i) => <text key={`x${i}`} x={left + (i + 0.5) * bw} y={bottom + 19} fontSize={labelSize} textAnchor="middle">{b.label.length > fit ? `${b.label.slice(0, Math.max(1, fit - 1))}…` : b.label}</text>)}
+    </g>
+    {!hist && item.showValues !== false ? bars.map((b, i) => <text key={`v${i}`} x={left + (i + 0.5) * bw} y={b.value >= 0 ? sy(b.value) - 6 : sy(b.value) + 17} fill={PLOT_INK.label} fontSize="14" textAnchor="middle" {...HALO} style={font}>{Number.isInteger(b.value) ? String(b.value).replace("-", "−") : fmtTick(b.value, step / 10)}</text>) : null}
+    {item.xLabel ? <text x={left + iw} y={bottom + 41} fill={PLOT_INK.label} fontSize="17" textAnchor="end" style={{ ...font, fontStyle: "italic" }}>{item.xLabel}</text> : null}
+    {item.yLabel ? <text x={left} y={top - 8} fill={PLOT_INK.label} fontSize="17" textAnchor="middle" style={{ ...font, fontStyle: "italic" }}>{item.yLabel}</text> : null}
+  </g>;
+}
+
 function Artifact({ item, sig }) {
   const [src, setSrc] = React.useState("");
   const [error, setError] = React.useState("");
@@ -1042,13 +1160,17 @@ function Artifact({ item, sig }) {
     const ok = (url, size = null) => { setError(""); setNatural(size); setSrc(url); };
     if (item.type === "svg") track(decodeThen(svgUrl(item.source), live, ok).catch(fail));
     if (item.type === "icon") track(decodeThen(`/icons/${encodeURIComponent(item.icon)}.svg`, live, ok).catch(() => fail(`icon "${item.icon}" could not be loaded`)));
+    if (item.type === "image") track(decodeThen(`/images/${item.file}`, live, ok).catch(() => fail("the image file is missing from the board's data folder (or is not a picture the browser can show)")));
     if (item.type === "molecule") track(renderMolecule(item.smiles, Math.round(item.width), Math.round(item.height)).then((svg) => decodeThen(svgUrl(svg), live, ok)).catch(fail));
     if (item.type === "mermaid") track(mermaid.render(`diagram-${item.id.replace(/[^a-zA-Z0-9_-]/g, "")}`, item.source).then(({ svg }) => { const t = tuneMermaid(svg); return decodeThen(svgUrl(t.svg), live, (url) => ok(url, t.size)); }).catch((e) => fail(`Mermaid: ${e?.message || e}`)));
     return () => { alive = false; };
-  }, [item.id, item.type, item.source, item.smiles, item.icon, item.width, item.height]);
+  }, [item.id, item.type, item.source, item.smiles, item.icon, item.file, item.width, item.height]);
   // A plot whose sliders changed starts again from their values; moving or restyling it keeps the learner's.
   if (item.type === "plot") return <Plot key={JSON.stringify(item.params ?? [])} item={item} />;
   if (item.type === "html") return <HtmlSlot item={item} />;
+  if (item.type === "table") return <Table item={item} />;
+  if (item.type === "code") return <Code item={item} />;
+  if (item.type === "chart") return <Chart item={item} />;
   if (error) return <g data-render-error={error}>
     <rect x={item.x} y={item.y} width={item.width} height={Math.min(item.height, 70)} fill="#ef6f6c22" stroke="#ef6f6c" strokeDasharray="6 4" />
     <text x={item.x + 12} y={item.y + 28} fill="#ef6f6c" fontSize="16" style={{ fontFamily: FONTS.sans }}>{item.type} artifact failed to render</text>

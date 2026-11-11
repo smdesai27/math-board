@@ -60,7 +60,7 @@ Why: asking a model to look at a screenshot and say what's wrong is slow, spends
 
 ## Small at rest
 
-Not every pi session is a lesson, so an unused board shouldn't tax every turn. In pi only `board_open` is active until the board is opened: 255 characters per turn instead of 12,977 for all seven tools. The long reference (artifact formats, SVG rules, plot grammar, animation, layout) lives in `board_docs`, which the tutor fetches by topic before it uses a format for the first time. The `board_teaching` section is constant text, so the prompt cache holds.
+Not every pi session is a lesson, so an unused board shouldn't tax every turn. In pi only `board_open` is active until the board is opened: 255 characters per turn instead of 13,058 for all seven tools. The long reference (artifact formats, SVG rules, plot grammar, animation, layout) lives in `board_docs`, which the tutor fetches by topic before it uses a format for the first time. The `board_teaching` section is constant text, so the prompt cache holds.
 
 ## Strict input, honest reports
 
@@ -101,7 +101,7 @@ Not done yet, roughly in the order I want them:
 
 - **Equation morphs.** A derivation step that transforms the line above in place (terms moving, cancelling, regrouping) instead of always writing a new line. The idea is Manim's `TransformMatchingTex`.
 - **Layout maps.** `below` and `rightOf` now place an item from another one's measured box, and arrows run between items, which covers most "next line" and "label this" placements. Still open: a free-space map for each chapter, so the warnings can say where there is room. Code2Video found a coarse grid beat free placement.
-- **Vectors.** A first-class vector item in plot coordinates, for forces, fields and magnetization, so an arrow sits on the axes it belongs to instead of being placed by hand next to them.
+- **Marks in plot coordinates.** A plot now takes `vectors` and `segments` in its own coordinates, for forces, fields and constructions. Still open: text and other marks placed in a plot's coordinates from outside it.
 - **Quiz mirroring.** The questions Eero's quiz extension asks in the terminal, shown on the board next to the drawing they're about, without changing his extension.
 
 The full survey of what else exists, and what's worth borrowing, is in [alternatives-2026-10-27.md](alternatives-2026-10-27.md).

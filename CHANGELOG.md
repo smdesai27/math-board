@@ -16,6 +16,15 @@
 - New board (the page's ⋯ menu, or `/board new`): saves the lesson under its title and today's date, then starts an empty board. The teaching text tells the tutor that the learner decides when a new board starts.
 - `/board status` says when another session hosts the board; `/board stop` then leaves it running.
 
+**New things to draw**
+
+- `table`: rows of text, numbers or math cells (`$…$`), a header row, highlighted rows, columns or cells.
+- `code`: a monospace listing with line numbers and highlighted lines.
+- `chart`: bar charts and histograms.
+- Plots take `vectors` and `segments` in their own coordinates; their ends can follow sliders.
+- `image`: a PNG, JPEG, GIF or WebP from the learner's disk, copied into the data folder. Only from the learning folder unless `MATH_BOARD_IMAGE_DIRS` allows more.
+- `board_docs` has a topic for each.
+
 **Teaching**
 
 - `focus: [ids]` in `board_update` points at items: a ring around each and the rest of the board dimmed, until the next update. Nothing is drawn.

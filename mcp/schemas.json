@@ -1041,7 +1041,7 @@
               }
             },
             "maxItems": 100,
-            "description": "{type: plot|svg|mermaid|molecule|icon, x, y, width, height, ...}: see board_docs"
+            "description": "{type: plot|svg|mermaid|molecule|icon|table|code|chart|image, x, y, width, height, ...}: see board_docs"
           }
         },
         "additionalProperties": false
@@ -1162,6 +1162,10 @@
           "mermaid",
           "molecule",
           "icon",
+          "table",
+          "code",
+          "chart",
+          "image",
           "html",
           "animation",
           "layout",

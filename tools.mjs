@@ -55,7 +55,7 @@ export const BOARD_TEACHING = [
     "Call board_open to start it; that activates the other board tools.",
   "",
   "Draw when a visual helps: derivations, geometry and vectors, diagrams of processes, plots, molecules, anatomy, " +
-    "timelines, flowcharts and state machines, trees and maps. " +
+    "timelines, flowcharts and state machines, trees and maps, tables, code, data charts, images. " +
     "Do not draw trivial or purely verbal points; answer those in the terminal.",
   "",
   "Rhythm: read the board (board_read), draw one step (board_update), ask one check question in the terminal " +
@@ -71,7 +71,7 @@ export const BOARD_TEACHING = [
   "The learner decides when a new board starts. If the board holds an unrelated earlier lesson, ask before drawing on it; " +
     "never clear it yourself.",
   "",
-  "Before you use an artifact type (plot, svg, mermaid, molecule, icon) for the first time, call board_docs for its format.",
+  "Before you use an artifact type for the first time, call board_docs for its format.",
   "",
   'The learner may refer to the board as "step 4, eq2": that is a step number and an item id. ' +
     "Read the board to find what they mean before you answer. Give items short ids (eq1, f2) so such references stay easy.",
@@ -92,6 +92,10 @@ export const DOC_TOPICS = Object.freeze([
   "mermaid",
   "molecule",
   "icon",
+  "table",
+  "code",
+  "chart",
+  "image",
   "html",
   "animation",
   "layout",
@@ -106,17 +110,21 @@ const ARTIFACT_COMMON =
 export const BOARD_DOCS = Object.freeze({
   overview: [
     "The blackboard is a view-only browser page the learner watches; you change it only through tools.",
-    "Tools: board_read (revision, chapters, camera, layout of one chapter), board_update (draw and edit; one call = one lesson step), " +
+    "Tools: board_read (revision, chapters, camera, the learner's view, layout of one chapter), board_update (draw and edit; one call = one lesson step), " +
       "board_snapshot (PNG of what the learner sees plus measured boxes), board_library (search ~2000 offline science illustrations), " +
       "board_save (named snapshots), board_docs (this reference).",
     "What you can draw, by topic:",
     "- equations: KaTeX math, \\color, \\boxed, \\cancel, chemistry with \\ce{...}",
     "- marks: lines, arrows, freehand curves, rectangles, ellipses, text",
-    "- plot: function graphs, parametric curves, shaded areas, points, asymptotes, and sliders the learner drags or plays (params)",
+    "- plot: function graphs, parametric curves, shaded areas, points, asymptotes, vectors and segments in the plot's coordinates, and sliders the learner drags or plays (params)",
     "- svg: hand-written SVG diagrams (markers, gradients, symbols, CSS, SMIL animation)",
     "- mermaid: flowcharts, sequence, state, class and ER diagrams, mind maps, timelines (automatic layout)",
     "- molecule: 2D structures from SMILES",
     "- icon: anatomy, organs, cells, microbes, viruses, DNA, plants, animals, lab equipment",
+    "- table: rows and columns of text, numbers or math, with highlighted rows, columns or cells (truth tables, comparisons, matrices, an algorithm's state)",
+    "- code: a listing in a monospace font with line numbers and highlighted lines",
+    "- chart: bar charts and histograms from data",
+    "- image: a picture file from the learner's disk (a figure from their slides, a micrograph, a scan)",
     "- html: your own HTML and JavaScript in a sandbox (3D scenes, simulations), only on boards started with MATH_BOARD_HTML=1",
     "Style (black board, chalk colors; keep it consistent): chalk white #e8e3d9 for main lines and text, muted #8a8578 for axes and guides; " +
       "accents yellow #f2c14e, blue #5fb3d9, red #ef6f6c, green #8de0be, purple #c39bd3; at most 3-4 accents per diagram.",
@@ -193,16 +201,19 @@ export const BOARD_DOCS = Object.freeze({
 
   plot: [
     "{type:\"plot\", x, y, width, height, xRange:[a,b] (default [-10,10]), yRange?:[c,d] (default: fitted), params?, functions?, parametric?, areas?, points?, " +
-      "vlines?, hlines?, xLabel?, yLabel?, title?, grid?, axes?, ticks? (all true by default; false hides), equalAspect? (true = same scale on both axes, for circles and geometry)}",
+      "vlines?, hlines?, vectors?, segments?, xLabel?, yLabel?, title?, grid?, axes?, ticks? (all true by default; false hides), equalAspect? (true = same scale on both axes, for circles and geometry)}",
     "- functions: up to 12 of {expr:\"sin(x)\", label?, color?, dash?, width?, domain?:[a,b]}",
     "- parametric: up to 8 of {x:\"cos(t)\", y:\"sin(t)\", t:[0,6.283] (default [0, 2pi]), label?, color?, dash?, width?}",
     "- areas: up to 6 of {expr, from, to, lower?:\"expr\"}: shades between expr and lower (default the x axis)",
     "- points: up to 200 of {x, y, label?, color?, size?}; vlines / hlines: up to 12 of {x} / {y} with label?, color?, dash? (asymptotes, markers)",
-    "At least one of functions, parametric, points or areas is required. Curves are traced (default reveal \"draw\").",
+    "- vectors: up to 24 of {from:[x,y], to:[x,y], label?, color?, width?, dash?}: an arrow in the plot's own coordinates (a force, a field, a velocity, " +
+      "a displacement), so it sits on the axes it belongs to; segments: the same without a head (a radius, a side of a triangle, a construction line). " +
+      "For geometry and vector diagrams set equalAspect:true and give xRange and yRange.",
+    "At least one of functions, parametric, points, areas, vectors or segments is required. Curves are traced (default reveal \"draw\").",
     "Sliders: params, up to 6 of {name, min, max, value? (default min), step?, label?, period? (seconds per sweep when played, default 4)}. " +
       "Each is a row under the plot that the learner drags, or plays with its ▶ button (min to max and back), and the plot redraws live. " +
       "A name (\"a\", \"omega\"; not x, t, a constant or a function) can be used in every expression of the plot, and as a point, vline or hline coordinate " +
-      "or an area's from/to: {x:\"a\", y:\"sin(a)\"}, {expr:\"sin(x)\", from:0, to:\"a\"}. A point with drag:true whose x and/or y is just a slider name can be dragged, " +
+      "or an area's from/to, or a vector's or segment's ends: {x:\"a\", y:\"sin(a)\"}, {expr:\"sin(x)\", from:0, to:\"a\"}, {from:[0,0], to:[\"cos(a)\",\"sin(a)\"]}. A point with drag:true whose x and/or y is just a slider name can be dragged, " +
       "which moves that slider. Each slider row takes 34 px of the plot's height (a height too small to leave a plot is rejected with the size needed). The fitted y range covers every slider's ends, or give yRange. " +
       "Snapshots, other tabs and board_read show each slider at its value; when the learner clicks the plot, the reference they copy includes their values.",
     "Expressions: numbers, the variable x (t in parametric), + - * / ^ (or **), unary minus, parentheses, implicit multiplication (2x, 3(x+1), 2pi), " +
@@ -264,6 +275,49 @@ export const BOARD_DOCS = Object.freeze({
     ARTIFACT_COMMON,
     'Example: {"type":"icon","id":"heart","icon":"heart-cross-section-2","x":700,"y":100,"width":260,"card":true,"label":"Heart"}',
     "CC-BY icons need attribution if the material is published (public/icons/CREDITS.md).",
+  ].join("\n"),
+
+  table: [
+    "{type:\"table\", x, y, rows:[[cell, ...], ...], header?:[head, ...], highlight?, align?, size?, width?, height?}: 1-40 rows of 1-12 cells, every row the same length.",
+    "- A cell is text (at most 120 characters) or a number; a cell written \"$...$\" is typeset as math (KaTeX): \"$x^2$\", \"$\\\\frac12$\".",
+    "- header: the column heads, drawn in yellow italics above a rule.",
+    "- highlight: up to 60 of {row?, col?, color?}: row alone shades that row (0 = the first row under the header), col alone that column, both one cell. " +
+      "Shade the row an algorithm is on, the column being compared, the cell that changed; change it later with {op:\"update\", id, fields:{highlight:[...]}}.",
+    "- align: left, center (default) or right. size: font px (default 20; it shrinks so the longest cell fits its column).",
+    "- Without width and height the table takes about 130 px a column and 44 px a row. Default reveal \"wipe\" (\"fade\" with math cells).",
+    ARTIFACT_COMMON,
+    'Example: {"type":"table","id":"tt","x":80,"y":140,"header":["p","q","$p \\\\land q$"],"rows":[["T","T","T"],["T","F","F"],["F","T","F"],["F","F","F"]],"highlight":[{"row":0}]}',
+  ].join("\n"),
+
+  code: [
+    "{type:\"code\", x, y, source, language?, highlight?, lineNumbers?, size?, width?, height?}: a listing in a monospace font, at most 80 lines and 6000 characters. " +
+      "Nothing is run and nothing is syntax-coloured: show the part you are teaching, not a whole file.",
+    "- highlight: line numbers (from 1) to mark with a yellow band, e.g. the line a loop is on; move it with {op:\"update\", id, fields:{highlight:[4]}} as you step through.",
+    "- language: a short tag shown in the corner (\"python\"). lineNumbers:false hides the numbers. size: font px (default 17; it shrinks so the longest line fits).",
+    "- Without width and height the box fits the listing. Point at a line from outside with an arrow or text placed rightOf the listing.",
+    ARTIFACT_COMMON,
+    'Example: {"type":"code","id":"bs","x":60,"y":120,"language":"python","highlight":[3],"source":"lo, hi = 0, len(a) - 1\\nwhile lo <= hi:\\n    mid = (lo + hi) // 2\\n    if a[mid] < x: lo = mid + 1\\n    else: hi = mid - 1"}',
+  ].join("\n"),
+
+  chart: [
+    "{type:\"chart\", kind:\"bar\"|\"histogram\", x, y, width, height, title?, xLabel?, yLabel?, yRange?:[low,high], color?}",
+    "- bar: bars: 1-40 of {label, value, color?}; the value is written above each bar (showValues:false hides it). Negative values hang below the axis.",
+    "- histogram: values: 2-5000 numbers, binned by the board; bins? (2-60; default from the count of values), range?:[low,high] (default the data's own).",
+    "Use a plot for functions and a chart for data. Default reveal \"wipe\".",
+    ARTIFACT_COMMON,
+    'Example: {"type":"chart","id":"c1","kind":"bar","x":620,"y":120,"width":460,"height":320,"yLabel":"count","bars":[{"label":"A","value":12},{"label":"B","value":7},{"label":"O","value":20,"color":"#ef6f6c"}]}',
+    'Example: {"type":"chart","id":"h1","kind":"histogram","x":60,"y":120,"width":460,"height":320,"xLabel":"height (cm)","bins":8,"values":[158,162,165,165,168,170,171,171,173,175,176,178,181,184,190]}',
+  ].join("\n"),
+
+  image: [
+    "{type:\"image\", x, y, width?, height?, path}: a PNG, JPEG, GIF or WebP file on the learner's disk, at most 8 MiB: a figure from their slides, a micrograph, " +
+      "a photo of the apparatus, a scan of their notes. path is absolute or starts with ~/.",
+    "The board copies the file into its own data folder, so the lesson keeps working if the original moves. It reads only from the folders the learner allows " +
+      "(their learning folder by default; MATH_BOARD_IMAGE_DIRS for more) and says which when a path is outside them: ask the learner then, do not guess other paths.",
+    "Give width or height, not both, to keep the picture's aspect ratio (neither: 360 wide). Add arrows and text marks on top to point at its parts, and focus to point at the whole.",
+    "You cannot see the picture from its path: call board_snapshot of its chapter before you describe or annotate it.",
+    ARTIFACT_COMMON,
+    'Example: {"type":"image","id":"fig3","path":"~/Learn/histology/liver-lobule.png","x":60,"y":110,"width":520}',
   ].join("\n"),
 
   html: [
@@ -418,7 +472,7 @@ export const TOOLS = Object.freeze([
     label: "Board reference",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description:
-      "Reference for the blackboard: artifact formats with examples (plot, svg, mermaid, molecule, icon), marks, equations, chapters and camera, animation, layout and style, saves. Call it before using a format for the first time.",
+      "Reference for the blackboard: artifact formats with examples (plot, svg, mermaid, molecule, icon, table, code, chart, image), marks, equations, chapters and camera, animation, layout and style, saves. Call it before using a format for the first time.",
   },
 ].map((tool) => Object.freeze(tool)));
 
@@ -629,7 +683,7 @@ export function buildSchemas(Type) {
         artifacts: Type.Optional(
           Type.Array(Type.Record(Type.String(), Type.Unknown()), {
             maxItems: 100,
-            description: "{type: plot|svg|mermaid|molecule|icon, x, y, width, height, ...}: see board_docs",
+            description: "{type: plot|svg|mermaid|molecule|icon|table|code|chart|image, x, y, width, height, ...}: see board_docs",
           }),
         ),
       }),
@@ -934,7 +988,9 @@ export const handlers = Object.freeze({
     const s = await ctx.server();
     // Everything except the tool's own fields goes to the server unchanged: it validates every
     // field and rejects what it cannot use with the reason, so nothing is dropped silently.
-    const { baseRevision, check, ...update } = params;
+    const { baseRevision, check, ...given } = params;
+    // Image artifacts name a file on disk: it is checked and copied into the data folder first.
+    const update = typeof s.ingestImages === "function" ? await s.ingestImages(given) : given;
     let result;
     const before = s.revision;
     const idsBefore = boardItems(s.board).map((it) => it.id);

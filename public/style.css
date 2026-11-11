@@ -19,3 +19,4 @@
 .cover{pointer-events:all;cursor:pointer;outline:none}.cover rect{fill:#151515;stroke:#8a8578;stroke-width:1.5;stroke-dasharray:7 6;vector-effect:non-scaling-stroke;transition:stroke .15s}.cover text{fill:#8a8578;font-family:KaTeX_Main,Georgia,serif;font-style:italic;transition:fill .15s}
 .cover:hover rect,.cover:focus-visible rect{stroke:#f2c14e}.cover:hover text,.cover:focus-visible text{fill:#f2c14e}
 .static #blackboard>g[data-id]{transition:none}
+.table-math{display:flex;align-items:center;height:100%;padding:0 8px;color:#e8e3d9;line-height:1}

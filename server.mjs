@@ -23,7 +23,7 @@
 
 import http from "node:http";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import path from "node:path";
@@ -181,7 +181,7 @@ export function emptyBoard(title = DEFAULT_TITLE) {
 }
 
 export const REVEALS = ["draw", "write", "wipe", "fade", "none"];
-export const ARTIFACT_TYPES = ["svg", "mermaid", "plot", "molecule", "icon", "html"];
+export const ARTIFACT_TYPES = ["svg", "mermaid", "plot", "molecule", "icon", "html", "table", "code", "chart", "image"];
 /**
  * html artifacts: HTML and JavaScript the model writes, run in a sandboxed frame (see
  * frameDocument). Off unless the learner starts the board with MATH_BOARD_HTML=1.
@@ -506,7 +506,7 @@ function checkExpr(src, vars, where) {
   try { compileExpr(src, vars); return src; } catch (e) { fail(`plot ${where}: "${String(src).slice(0, 60)}": ${e.message}`); }
 }
 const STYLE_KEYS = ["color", "width", "dash", "label"];
-const PLOT_KEYS = ["xRange", "yRange", "grid", "axes", "ticks", "equalAspect", "xLabel", "yLabel", "title", "params", "functions", "parametric", "areas", "points", "vlines", "hlines"];
+const PLOT_KEYS = ["xRange", "yRange", "grid", "axes", "ticks", "equalAspect", "xLabel", "yLabel", "title", "params", "functions", "parametric", "areas", "points", "vlines", "hlines", "vectors", "segments"];
 const PLOT_PART_KEYS = {
   params: keys("name", "min", "max", "value", "step", "label", "period"),
   functions: keys("expr", "domain", STYLE_KEYS),
@@ -515,6 +515,8 @@ const PLOT_PART_KEYS = {
   points: keys("x", "y", "size", "drag", STYLE_KEYS),
   vlines: keys("x", STYLE_KEYS),
   hlines: keys("y", STYLE_KEYS),
+  vectors: keys("from", "to", STYLE_KEYS),
+  segments: keys("from", "to", STYLE_KEYS),
 };
 // A slider's name is a variable in the plot's expressions, so it cannot be one of their own names.
 const PARAM_NAME = /^[A-Za-z][A-Za-z0-9_]{0,15}$/;
@@ -607,8 +609,169 @@ function sanitizePlot(raw, strict, where, height) {
   });
   out.vlines = list("vlines", 12).map(([v, pr, i]) => ({ x: coord(v, pr, "x", 0, `vlines[${i}]`), ...style(pr) }));
   out.hlines = list("hlines", 12).map(([h, pr, i]) => ({ y: coord(h, pr, "y", 0, `hlines[${i}]`), ...style(pr) }));
-  if (!out.functions.length && !out.parametric.length && !out.points.length && !out.areas.length) fail("plot needs at least one of functions, parametric, points or areas");
+  // Arrows and line segments in the plot's own coordinates (forces, fields, constructions): each
+  // end is [x, y], numbers or, like a point's, expressions of the sliders.
+  const ends = (name, max) => list(name, max).map(([v, pr, i]) => {
+    const end = (key) => {
+      const p = v[key], at = `${name}[${i}].${key}`;
+      if (!Array.isArray(p) || p.length !== 2) fail(`plot ${at} must be [x, y], got ${show(p)}`);
+      const part = { x: p[0], y: p[1] }, rd = reader(part, `${where} ${at}`, strict);
+      return [coord(part, rd, "x", 0, at), coord(part, rd, "y", 0, at)];
+    };
+    return { from: end("from"), to: end("to"), ...style(pr) };
+  });
+  const vectors = ends("vectors", 24), segments = ends("segments", 24);
+  if (vectors.length) out.vectors = vectors;
+  if (segments.length) out.segments = segments;
+  if (!out.functions.length && !out.parametric.length && !out.points.length && !out.areas.length && !vectors.length && !segments.length)
+    fail("plot needs at least one of functions, parametric, points, areas, vectors or segments");
   return out;
+}
+
+/* ---- table, code and chart artifacts: data the page draws itself (no source that runs or is parsed as markup) ---- */
+
+const MAX_TABLE_ROWS = 40, MAX_TABLE_COLS = 12, MAX_CODE_LINES = 80, MAX_CODE_CHARS = 6000, MAX_BARS = 40, MAX_HISTOGRAM_VALUES = 5000;
+
+/** A table: rows of cells (text or numbers; "$...$" is typeset as math), an optional header row, highlights. */
+function sanitizeTable(raw, r, where, strict) {
+  const cell = (v, at) => {
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+    if (typeof v !== "string" || v.length > 120) fail(`${where}: ${at} must be text of at most 120 characters or a number, got ${show(v)}`);
+    return v;
+  };
+  if (!Array.isArray(raw.rows) || !raw.rows.length || raw.rows.length > MAX_TABLE_ROWS) fail(`${where}: table needs rows: 1 to ${MAX_TABLE_ROWS} arrays of cells`);
+  const cols = Array.isArray(raw.header) ? raw.header.length : Array.isArray(raw.rows[0]) ? raw.rows[0].length : 0;
+  if (!cols || cols > MAX_TABLE_COLS) fail(`${where}: a table has 1 to ${MAX_TABLE_COLS} columns`);
+  const out = {};
+  if (raw.header !== undefined) {
+    if (!Array.isArray(raw.header)) fail(`${where}: header must be an array of column heads`);
+    out.header = raw.header.map((v, c) => cell(v, `header[${c}]`));
+  }
+  out.rows = raw.rows.map((row, i) => {
+    if (!Array.isArray(row) || row.length !== cols) fail(`${where}: rows[${i}] must have ${cols} cells like ${raw.header !== undefined ? "the header" : "the first row"}, got ${Array.isArray(row) ? row.length : show(row)}`);
+    return row.map((v, c) => cell(v, `rows[${i}][${c}]`));
+  });
+  const align = r.oneOf("align", ["left", "center", "right"]);
+  if (align && align !== "center") out.align = align;
+  const size = r.num("size");
+  if (size !== undefined) out.size = clamp(size, 10, 48);
+  if (raw.highlight !== undefined) {
+    if (!Array.isArray(raw.highlight) || raw.highlight.length > 60) fail(`${where}: highlight must be a list of at most 60 of {row?, col?, color?}`);
+    out.highlight = raw.highlight.map((h, i) => {
+      const at = `${where} highlight[${i}]`;
+      if (!h || typeof h !== "object" || Array.isArray(h)) fail(`${at} must be {row?, col?, color?}`);
+      if (strict) onlyKeys(h, keys("row", "col", "color"), at);
+      const hr = reader(h, at, strict), o = {};
+      const row = hr.int("row", 0, out.rows.length - 1), col = hr.int("col", 0, cols - 1);
+      if (row === undefined && col === undefined) fail(`${at} needs row (0 = the first row under the header), col, or both`);
+      if (strict && ((h.row !== undefined && h.row >= out.rows.length) || (h.col !== undefined && h.col >= cols))) fail(`${at}: the table has rows 0-${out.rows.length - 1} and columns 0-${cols - 1}`);
+      if (row !== undefined) o.row = row;
+      if (col !== undefined) o.col = col;
+      const color = hr.color("color");
+      if (color) o.color = color;
+      return o;
+    });
+  }
+  return { fields: out, cols, lines: out.rows.length + (out.header ? 1 : 0) };
+}
+
+/** A code listing: plain text in a monospace font, with line numbers and highlighted lines. Nothing is run. */
+function sanitizeCode(raw, r, where, strict) {
+  if (typeof raw.source !== "string" || !raw.source.trim()) fail(`${where}: code needs source (the listing as text)`);
+  const source = raw.source.replace(/\r\n?/g, "\n").replace(/\t/g, "  ").replace(/\n+$/, "");
+  const lines = source.split("\n");
+  if (source.length > MAX_CODE_CHARS || lines.length > MAX_CODE_LINES) fail(`${where}: code takes at most ${MAX_CODE_LINES} lines and ${MAX_CODE_CHARS} characters (it has ${lines.length} lines, ${source.length} characters): show the part you are teaching`);
+  const out = { source };
+  const language = r.str("language", 24);
+  if (language) out.language = language;
+  if (r.bool("lineNumbers") === false) out.lineNumbers = false;
+  const size = r.num("size");
+  if (size !== undefined) out.size = clamp(size, 8, 40);
+  if (raw.highlight !== undefined) {
+    const ok = Array.isArray(raw.highlight) && raw.highlight.length <= MAX_CODE_LINES && raw.highlight.every((n) => Number.isInteger(n) && n >= 1 && n <= lines.length);
+    if (!ok) fail(`${where}: highlight must be a list of line numbers from 1 to ${lines.length}, got ${show(raw.highlight)}`);
+    out.highlight = [...new Set(raw.highlight)].sort((a, b) => a - b);
+  }
+  return { fields: out, lines: lines.length, longest: Math.max(...lines.map((l) => l.length)) };
+}
+
+/** A bar chart (bars: label and value) or a histogram (values, binned by the page). */
+function sanitizeChart(raw, r, where, strict) {
+  const kind = raw.kind;
+  if (kind !== "bar" && kind !== "histogram") fail(`${where}: chart kind must be "bar" or "histogram", got ${show(kind)}`);
+  const out = { kind };
+  for (const k of ["xLabel", "yLabel", "title"]) { const v = r.str(k, 60); if (v) out[k] = v; }
+  const color = r.color("color");
+  if (color) out.color = color;
+  const num = (v) => typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= 1e9;
+  if (raw.yRange !== undefined) {
+    if (!Array.isArray(raw.yRange) || raw.yRange.length !== 2 || !raw.yRange.every(num) || !(raw.yRange[1] > raw.yRange[0])) fail(`${where}: yRange must be [low, high]`);
+    out.yRange = raw.yRange;
+  }
+  if (kind === "bar") {
+    if (raw.values !== undefined || raw.bins !== undefined || raw.range !== undefined) fail(`${where}: a bar chart takes bars:[{label, value}]; values, bins and range are for a histogram`);
+    if (!Array.isArray(raw.bars) || !raw.bars.length || raw.bars.length > MAX_BARS) fail(`${where}: a bar chart needs bars: 1 to ${MAX_BARS} of {label, value, color?}`);
+    out.bars = raw.bars.map((b, i) => {
+      const at = `${where} bars[${i}]`;
+      if (!b || typeof b !== "object" || Array.isArray(b)) fail(`${at} must be {label, value, color?}`);
+      if (strict) onlyKeys(b, keys("label", "value", "color"), at);
+      if (!num(b.value)) fail(`${at}: value must be a number, got ${show(b.value)}`);
+      const br = reader(b, at, strict), o = { label: br.str("label", 40) ?? "", value: b.value };
+      const c = br.color("color");
+      if (c) o.color = c;
+      return o;
+    });
+    if (r.bool("showValues") === false) out.showValues = false;
+  } else {
+    if (raw.bars !== undefined || raw.showValues !== undefined) fail(`${where}: a histogram takes values:[numbers]; bars and showValues are for a bar chart`);
+    if (!Array.isArray(raw.values) || raw.values.length < 2 || raw.values.length > MAX_HISTOGRAM_VALUES || !raw.values.every(num)) fail(`${where}: a histogram needs values: 2 to ${MAX_HISTOGRAM_VALUES} numbers`);
+    out.values = raw.values;
+    const bins = r.int("bins", 2, 60);
+    if (bins !== undefined) out.bins = bins;
+    if (raw.range !== undefined) {
+      if (!Array.isArray(raw.range) || raw.range.length !== 2 || !raw.range.every(num) || !(raw.range[1] > raw.range[0])) fail(`${where}: range must be [low, high]`);
+      out.range = raw.range;
+    }
+  }
+  return out;
+}
+
+/* ---- image artifacts: a picture file from the learner's disk, copied into the data folder ---- */
+
+const IMAGE_FILE_RE = /^[a-f0-9]{64}\.(png|jpg|gif|webp)$/;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const IMAGE_MIME = { png: "image/png", jpg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+
+/** { ext, w, h } of a PNG, JPEG, GIF or WebP from its first bytes, or null. The file's name is not trusted. */
+export function imageInfo(buf) {
+  if (buf.length > 24 && buf.readUInt32BE(0) === 0x89504e47 && buf.readUInt32BE(4) === 0x0d0a1a0a) return { ext: "png", w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+  if (buf.length > 10 && (buf.toString("latin1", 0, 6) === "GIF87a" || buf.toString("latin1", 0, 6) === "GIF89a")) return { ext: "gif", w: buf.readUInt16LE(6), h: buf.readUInt16LE(8) };
+  if (buf.length > 30 && buf.toString("latin1", 0, 4) === "RIFF" && buf.toString("latin1", 8, 12) === "WEBP") {
+    const kind = buf.toString("latin1", 12, 16);
+    if (kind === "VP8X") return { ext: "webp", w: 1 + buf.readUIntLE(24, 3), h: 1 + buf.readUIntLE(27, 3) };
+    if (kind === "VP8 ") return { ext: "webp", w: buf.readUInt16LE(26) & 0x3fff, h: buf.readUInt16LE(28) & 0x3fff };
+    if (kind === "VP8L") { const b = buf.readUInt32LE(21); return { ext: "webp", w: 1 + (b & 0x3fff), h: 1 + ((b >> 14) & 0x3fff) }; }
+    return null;
+  }
+  if (buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+    // JPEG: walk the segments to the frame header (SOF0-SOF15, without the DHT, JPG and DAC markers).
+    for (let at = 2; at + 9 < buf.length; ) {
+      if (buf[at] !== 0xff) return null;
+      const marker = buf[at + 1];
+      if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) return { ext: "jpg", w: buf.readUInt16BE(at + 7), h: buf.readUInt16BE(at + 5) };
+      at += 2 + buf.readUInt16BE(at + 2);
+    }
+  }
+  return null;
+}
+
+/**
+ * The folders an image artifact's path may be in: $MATH_BOARD_IMAGE_DIRS (separated like PATH),
+ * else the learning folder ($MATH_BOARD_LEARN_DIR, $PI_LEARN_DIR or ~/Learn).
+ */
+export function imageDirs(env = process.env) {
+  const list = env.MATH_BOARD_IMAGE_DIRS ? env.MATH_BOARD_IMAGE_DIRS.split(path.delimiter) : [env.MATH_BOARD_LEARN_DIR ?? env.PI_LEARN_DIR ?? path.join(homedir(), "Learn")];
+  return list.map((d) => d.trim()).filter((d) => path.isAbsolute(d)).map((d) => path.resolve(d));
 }
 
 const ARTIFACT_COMMON_KEYS = ["type", "id", "x", "y", "width", "height", "label", "z", "opacity", "chapter", ...ANIMATION_KEYS];
@@ -619,6 +782,11 @@ const ARTIFACT_KEYS = {
   svg: keys(ARTIFACT_COMMON_KEYS, "source"),
   mermaid: keys(ARTIFACT_COMMON_KEYS, "source"),
   html: keys(ARTIFACT_COMMON_KEYS, "source", "libs"),
+  table: keys(ARTIFACT_COMMON_KEYS, "rows", "header", "align", "size", "highlight"),
+  code: keys(ARTIFACT_COMMON_KEYS, "source", "language", "lineNumbers", "size", "highlight"),
+  chart: keys(ARTIFACT_COMMON_KEYS, "kind", "bars", "values", "bins", "range", "yRange", "xLabel", "yLabel", "title", "color", "showValues"),
+  // `path` is what the tutor gives; the board keeps `file` (the copy in the data folder) and `natural` (its size).
+  image: keys(ARTIFACT_COMMON_KEYS, "path", "file", "natural"),
 };
 
 /** Mermaid text: rendered with securityLevel strict and shown as an image; links, callbacks, markup and directives are refused. */
@@ -672,6 +840,31 @@ export function sanitizeArtifact(raw, { strict = false, keys: checkKeys = strict
     if (typeof raw.smiles !== "string" || !raw.smiles.trim() || raw.smiles.length > 500 || !/^[A-Za-z0-9@+\-[\]()=#$:./\\%*~>]+$/.test(raw.smiles.trim()))
       fail("molecule needs a SMILES string (e.g. 'CCO' for ethanol, 'c1ccccc1' for benzene), at most 500 characters, no spaces");
     out.smiles = raw.smiles.trim();
+  } else if (raw.type === "table") {
+    const t = sanitizeTable(raw, r, where, strict);
+    Object.assign(out, t.fields);
+    // A size from the content when none is given: about 130 px a column and 44 px a row.
+    if (!r.has("width")) out.width = clamp(t.cols * 130, 80, 1200);
+    if (!r.has("height")) out.height = clamp(t.lines * 44, 60, 800);
+  } else if (raw.type === "code") {
+    const c = sanitizeCode(raw, r, where, strict);
+    Object.assign(out, c.fields);
+    if (!r.has("width")) out.width = clamp(c.longest * 10.4 + (out.lineNumbers === false ? 32 : 76), 200, 1200);
+    if (!r.has("height")) out.height = clamp(c.lines * 24 + 28, 60, 800);
+  } else if (raw.type === "chart") {
+    Object.assign(out, sanitizeChart(raw, r, where, strict));
+  } else if (raw.type === "image") {
+    // BoardServer#ingestImages turns a path into `file` before the update is applied.
+    if (raw.path !== undefined) fail(`${where}: this board cannot read image files from a path here (images are added through board_update)`);
+    if (typeof raw.file !== "string" || !IMAGE_FILE_RE.test(raw.file)) fail(`${where}: image needs path: a PNG, JPEG, GIF or WebP file on the learner's disk`);
+    out.file = raw.file;
+    const n = raw.natural;
+    if (Array.isArray(n) && n.length === 2 && n.every((v) => Number.isInteger(v) && v > 0 && v <= 65535)) {
+      out.natural = n;
+      // Keep the picture's aspect ratio when one dimension (or none) is given.
+      if (!r.has("height")) out.height = clamp((out.width * n[1]) / n[0], 60, 800);
+      else if (!r.has("width")) out.width = clamp((out.height * n[0]) / n[1], 80, 1200);
+    }
   } else if (raw.type === "svg") {
     out.source = checkSvgSource(raw.source);
   } else if (raw.type === "mermaid") {
@@ -1454,6 +1647,53 @@ export class BoardServer {
     return { revision: this.revision, warnings, touched };
   }
 
+  /**
+   * Image artifacts arrive with `path`: a picture on the learner's disk. Each is checked (inside
+   * a folder the board may read, a real PNG, JPEG, GIF or WebP by its bytes, at most 8 MiB),
+   * copied to <dataDir>/images/<sha256>.<ext> and replaced by { file, natural } in a copy of the
+   * update, so the board and its saves never depend on the original staying where it was.
+   */
+  async ingestImages(update) {
+    const artifacts = update?.scene?.artifacts;
+    if (!Array.isArray(artifacts) || !artifacts.some((a) => a?.type === "image" && a.path !== undefined)) return update;
+    const roots = [];
+    for (const dir of imageDirs()) roots.push(await realpath(dir).catch(() => null));
+    const allowed = roots.filter(Boolean);
+    const out = [];
+    for (const [i, a] of artifacts.entries()) {
+      if (a?.type !== "image" || a.path === undefined) { out.push(a); continue; }
+      const where = `scene.artifacts[${i}]`;
+      if (a.file !== undefined || a.natural !== undefined) fail(`${where}: give path only (file and natural are the board's own)`);
+      if (typeof a.path !== "string" || !a.path || a.path.length > 1024) fail(`${where}: path must be the path of an image file`);
+      const asked = a.path.startsWith("~/") ? path.join(homedir(), a.path.slice(2)) : a.path;
+      if (!path.isAbsolute(asked)) fail(`${where}: path must be absolute (or start with ~/), got ${show(a.path)}`);
+      const real = await realpath(asked).catch(() => null);
+      if (!real) fail(`${where}: no file at ${a.path}`);
+      if (!allowed.some((root) => real === root || real.startsWith(root + path.sep)))
+        fail(`${where}: ${a.path} is outside the folders this board may show images from (${imageDirs().join(", ") || "none"}). The learner can allow more with MATH_BOARD_IMAGE_DIRS.`);
+      const info = await stat(real);
+      if (!info.isFile() || info.size > MAX_IMAGE_BYTES) fail(`${where}: ${a.path} must be a file of at most ${MAX_IMAGE_BYTES / 1024 / 1024} MiB`);
+      const data = await readFile(real);
+      const kind = imageInfo(data);
+      if (!kind || !(kind.w > 0 && kind.h > 0)) fail(`${where}: ${a.path} is not a PNG, JPEG, GIF or WebP image`);
+      const file = `${createHash("sha256").update(data).digest("hex")}.${kind.ext}`;
+      const dir = path.join(this.dataDir, "images");
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      if (!(await stat(path.join(dir, file)).catch(() => null))) {
+        const temp = path.join(dir, `.${randomUUID()}.tmp`);
+        try {
+          await writeFile(temp, data, { mode: 0o600 });
+          await rename(temp, path.join(dir, file));
+        } finally {
+          await rm(temp, { force: true });
+        }
+      }
+      const { path: _path, ...rest } = a;
+      out.push({ ...rest, file, natural: [Math.min(kind.w, 65535), Math.min(kind.h, 65535)] });
+    }
+    return { ...update, scene: { ...update.scene, artifacts: out } };
+  }
+
   /** Boxes a layout check measured at `revision`; kept only if the board has not changed since. */
   noteBoxes(items, revision) {
     if (revision !== this.revision || !Array.isArray(items)) return;
@@ -2021,6 +2261,19 @@ export class BoardServer {
       if (req.headers.origin !== undefined && !this.allowedOrigin(req.headers.origin) && !(library && req.headers.origin === "null"))
         return this.json(res, 403, { ok: false, error: "forbidden origin" });
       if (req.method === "GET" && pathname.startsWith("/frame/")) return this.serveFrame(res, pathname.slice("/frame/".length));
+      // An image artifact's file: its name is the SHA-256 of its content, which only the board's
+      // state (behind the token) tells, so the address itself is the key, as with html frames.
+      if (req.method === "GET" && pathname.startsWith("/images/")) {
+        const name = pathname.slice("/images/".length);
+        if (!IMAGE_FILE_RE.test(name)) return this.notFound(res);
+        try {
+          const data = await readFile(path.join(this.dataDir, "images", name));
+          res.writeHead(200, { "content-type": IMAGE_MIME[name.split(".")[1]], "cache-control": "private, max-age=31536000, immutable", "content-length": data.length });
+          return res.end(data);
+        } catch {
+          return this.notFound(res);
+        }
+      }
       // Who answers here: lets a session that found this board's lock tell it from a stale one.
       if (req.method === "GET" && pathname === "/api/ping") return this.json(res, 200, { ok: true, name: "math-board", instance: this.instance });
       // Static app routes (page load carries no auth yet; the app reads the token from the URL
