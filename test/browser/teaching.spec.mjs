@@ -26,6 +26,15 @@ async function lesson(page, hash = "&static=1") {
   await expect(page.locator('#blackboard g[data-id="ans"]')).toHaveCount(1);
 }
 const opacity = (page, id) => page.locator(`#blackboard g[data-id="${id}"]`).evaluate((g) => Number(getComputedStyle(g).opacity));
+/**
+ * Where an equation is drawn on screen: its foreignObject's corner and its HTML's size at the
+ * view's scale. Not its client rect: in WebKit that counts the view's scale twice (style.css).
+ */
+const drawnBox = (page, id) => page.evaluate((id) => {
+  const f = document.querySelector(`#blackboard g[data-id="${id}"] .formula`), fo = f.parentNode.getBoundingClientRect();
+  const k = document.getElementById("blackboard").getScreenCTM().a;
+  return { x: fo.x, y: fo.y, width: f.offsetWidth * k, height: f.offsetHeight * k };
+}, id);
 
 test("focus rings the items the tutor points at and dims the rest, until its next update", async ({ page }) => {
   await lesson(page);
@@ -34,7 +43,7 @@ test("focus rings the items the tutor points at and dims the rest, until its nex
   const ring = page.locator("#overlay .focus-ring");
   await expect(ring).toHaveCount(1);
   // The ring sits around the equation, in the same view as the board.
-  const [r, f] = [await ring.boundingBox(), await page.locator('#blackboard g[data-id="q"] .formula').boundingBox()];
+  const [r, f] = [await ring.boundingBox(), await drawnBox(page, "q")];
   expect(r.x).toBeLessThan(f.x);
   expect(r.y).toBeLessThan(f.y);
   expect(r.x + r.width).toBeGreaterThan(f.x + f.width);
@@ -70,7 +79,7 @@ test("a covered item stays hidden until the learner clicks its cover; the tutor'
   await expect(cover).toHaveCount(1);
   expect(await opacity(page, "ans")).toBe(0);
   // The cover is over the answer, and the answer is still measured.
-  const [c, f] = [await cover.boundingBox(), await page.locator('#blackboard g[data-id="ans"] .formula').boundingBox()];
+  const [c, f] = [await cover.boundingBox(), await drawnBox(page, "ans")];
   expect(c.x).toBeLessThan(f.x);
   expect(c.x + c.width).toBeGreaterThan(f.x + f.width);
   expect((await page.evaluate(() => window.__boardLint())).items.some((i) => i.id === "ans" && i.w > 0)).toBe(true);
