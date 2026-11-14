@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Equations and math in table cells sit in their chapters at every zoom in Safari and Math Board.app. WebKit drew them unscaled from the top left of the board, so equations from different chapters piled up there. One difference remains in WebKit: an item given a higher `z` than an equation it overlaps still draws under it.
+
 ## 0.4.0 (2026-11-11)
 
 **Install and connect**

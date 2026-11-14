@@ -20,4 +20,13 @@
 .cover:hover rect,.cover:focus-visible rect{stroke:#f2c14e}.cover:hover text,.cover:focus-visible text{fill:#f2c14e}
 .static .focus-veil{animation:none}@media(prefers-reduced-motion:reduce){.focus-veil,.focus-ring{animation:none}}
 .table-math{display:flex;align-items:center;height:100%;padding:0 8px;color:#e8e3d9;line-height:1}
+/* WebKit only (app.jsx, WEBKIT_FO): the HTML root inside each foreignObject becomes its own layer,
+   placed in the foreignObject's coordinates (position:fixed) and scaled from board units to
+   screen pixels by hand, since WebKit draws such a layer at 1:1. It also takes the item's fade,
+   and a covered item hides it: the SVG group's opacity does not reach a layer. Table cells get
+   their size in board units from the page, because percentages here resolve against the window.
+   As a layer it paints above every SVG mark on the board, whatever their z; #overlay (rings,
+   covers, the focus veil) still paints above it. */
+.webkit-fo .formula,.webkit-fo .table-math{position:fixed;left:0;top:0;transform:scale(calc(1 / var(--view-scale,1)));transform-origin:0 0;opacity:var(--fade,1)}
+.webkit-fo #blackboard>g.covered{--fade:0}
 @media(max-width:700px),(max-height:480px){#bar{top:5px;opacity:.5;font-size:12px}#bar-top{height:26px;gap:6px;padding:0 10px}#bar:not(.open) #board-title{display:none}#bar:not(.open):not(.note):has(#step-indicator:empty)[data-conn=connected]{opacity:.28}#nav-hint{display:none}#bar button{min-width:28px;height:26px;padding:0 6px}#toast{bottom:8px}}

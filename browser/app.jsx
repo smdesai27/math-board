@@ -178,6 +178,13 @@ function syncCamera(board, first) {
 const STATIC = NO_FOLLOW || hash.get("static") === "1" || matchMedia("(prefers-reduced-motion: reduce)").matches;
 // Snapshots show the board settled: no fades in progress.
 document.documentElement.classList.toggle("static", STATIC);
+// WebKit (Safari, the Mac app's WKWebView) paints every positioned element inside an SVG
+// foreignObject (KaTeX is full of them) on its own layer: the layer lands at the right place on
+// screen but at 1:1 scale, and the opacity of the SVG groups above it does not reach it. With this
+// class, style.css makes the root inside each foreignObject such a layer itself and scales it by
+// the view; item fades reach it through --fade.
+const WEBKIT_FO = /^Apple/.test(navigator.vendor);
+document.documentElement.classList.toggle("webkit-fo", WEBKIT_FO);
 let maxStep = 0;
 // mode "live": new steps are drawn as they arrive (catching up in order);
 // mode "manual": the viewer is stepping/replaying and new steps wait.
@@ -279,7 +286,12 @@ function drawIn(g, ms) {
     }
   });
 }
-function fadeIn(g, ms) { return tween(ms, (t) => { g.style.opacity = t >= 1 ? "" : String(t); }); }
+function fadeIn(g, ms) {
+  return tween(ms, (t) => {
+    g.style.opacity = t >= 1 ? "" : String(t);
+    if (WEBKIT_FO) g.style.setProperty("--fade", g.style.opacity);
+  });
+}
 async function reveal(g, token, scale = 1) {
   if (token.cancelled) return;
   const how = defaultReveal(g);
@@ -1111,7 +1123,7 @@ function Table({ item }) {
     {Array.from({ length: cols - 1 }, (_, c) => <line key={`c${c}`} x1={x + (c + 1) * cw} y1={y} x2={x + (c + 1) * cw} y2={y + H} stroke="#ffffff1c" strokeWidth="1" />)}
     {all.map((row, i) => row.map((cell, c) => isMathCell(cell)
       ? <foreignObject key={`${i}-${c}`} x={x + c * cw} y={y + i * rh} width={cw} height={rh} style={{ pointerEvents: "none" }}>
-          <div xmlns="http://www.w3.org/1999/xhtml" className="table-math" style={{ fontSize: `${size}px`, justifyContent: align === "left" ? "flex-start" : align === "right" ? "flex-end" : "center" }}><CellMath latex={cell.slice(1, -1)} /></div>
+          <div xmlns="http://www.w3.org/1999/xhtml" className="table-math" style={{ width: cw, height: rh, fontSize: `${size}px`, justifyContent: align === "left" ? "flex-start" : align === "right" ? "flex-end" : "center" }}><CellMath latex={cell.slice(1, -1)} /></div>
         </foreignObject>
       : <text key={`${i}-${c}`} x={tx(c)} y={y + i * rh + rh / 2} fill={i < head ? "#f2c14e" : "#e8e3d9"} fontSize={size} textAnchor={anchor} dominantBaseline="central" style={{ fontFamily: FONTS.serif, fontStyle: i < head ? "italic" : undefined }}>{cut(cell)}</text>))}
   </g>;
@@ -1406,9 +1418,17 @@ function Board({ board, revision, frames }) {
 }
 
 /* ---------- layout lint (measured from the real DOM) ---------- */
+/** Screen box of an item's element. WebKit counts the hand-made view scale of an equation's HTML
+ * root (style.css, WEBKIT_FO) on top of the SVG's own when it measures it: take it out again. */
+function clientRect(el) {
+  const r = el.getBoundingClientRect();
+  if (!WEBKIT_FO || !el.classList?.contains("formula")) return r;
+  const k = new DOMMatrixReadOnly(getComputedStyle(el).transform).a || 1;
+  return new DOMRect(r.x, r.y, r.width / k, r.height / k);
+}
 function boardRect(svg, el) {
   const inv = svg.getScreenCTM().inverse();
-  const r = el.getBoundingClientRect();
+  const r = clientRect(el);
   if (!r.width && !r.height) return null;
   const p1 = new DOMPoint(r.left, r.top).matrixTransform(inv), p2 = new DOMPoint(r.right, r.bottom).matrixTransform(inv);
   return { x: p1.x, y: p1.y, w: p2.x - p1.x, h: p2.y - p1.y };
@@ -1491,7 +1511,7 @@ function segDist(px, py, ax, ay, bx, by) {
 function hitItem(g, x, y) {
   if (g.style.visibility === "hidden") return null; // a step not shown yet
   const box = g.dataset.kind === "equation" ? g.querySelector(".formula") : g;
-  const rect = box?.getBoundingClientRect();
+  const rect = box && clientRect(box);
   if (!rect || (!rect.width && !rect.height)) return null;
   const out = Math.hypot(Math.max(rect.left - x, 0, x - rect.right), Math.max(rect.top - y, 0, y - rect.bottom));
   if (out > REF_SLACK) return null;
